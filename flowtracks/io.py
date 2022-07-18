@@ -28,7 +28,7 @@ from .particle import Particle
 from .trajectory import Trajectory, mark_unique_rows, \
     Frame, take_snapshot, trajectories_in_frame
 
-from future.utils import items
+from future.utils import iteritems
 
 
 class FramesIterator(object):
