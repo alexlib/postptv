@@ -31,7 +31,7 @@ from .trajectory import Trajectory, mark_unique_rows, \
 
 
 class FramesIterator(object):
-    def __init__(self, fname_tmpl, fmt, skip, first=None, last=None):
+    def __init__(self, fname_tmpl, fmt, skip, first=None, last=None, usecols=None):
         """
         Arguments:
         fname_tmpl - a template file name representing all ptv_is/xuap files in
@@ -40,10 +40,13 @@ class FramesIterator(object):
         skip - number of header lines to skip in each file.
         first, last - inclusive range of frames to read, rel. filename
             numbering.
+        usecols - columns to use from the file (for xuap format with extra columns).
         """
         self._frmix = 0
+        # Use converters to handle integer parsing properly
+        converters = {0: float, 1: float}  # Convert columns 0 and 1 (prev and next) to float first
         self._read_frame = lambda fix: np.atleast_1d(
-            np.loadtxt(fname_tmpl % fix, dtype=fmt, skiprows=skip))
+            np.loadtxt(fname_tmpl % fix, dtype=fmt, skiprows=skip, usecols=usecols, converters=converters))
 
         dirname, basename = os.path.split(fname_tmpl)
         is_data_file = re.compile(basename.replace('%d', r'(\d+)', 1))
@@ -272,6 +275,8 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
     fname = os.path.expanduser(fname)
 
     if xuap:
+        # The xuap format has 15 columns: 2 integers + 3 arrays of 3 floats + 1 array of 3 floats + 1 extra float
+        # We'll use usecols to select only the columns we need
         fmt = np.dtype([('prev', 'i4'), ('next', 'i4'), ('pos', '3f8'),
                         ('pos_int', '3f8'), ('vel', '3f8'), ('acc', '3f8')])
         skip = 0
@@ -288,7 +293,9 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
 
     frames = []
     if re.search(r'%\d*?d', fname) is not None:
-        frm_iter = FramesIterator(fname, fmt, skip, first, last)
+        # For xuap format with 15 columns, use only the first 14 columns
+        usecols = range(14) if xuap else None
+        frm_iter = FramesIterator(fname, fmt, skip, first, last, usecols=usecols)
     else:
         frm_iter = SingleFileIterator(fname, fmt)
 
@@ -696,6 +703,7 @@ def save_particles_table(filename, trajects, trim=None):
     trim_len = 0 if trim is None else trim * 2
 
     outfile = tables.open_file(filename, mode='w')
+    # Use scalar shape for each field
     bounds_tab = outfile.create_table('/', 'bounds',
         np.dtype([('trajid', int), ('first', int), ('last', int)]))
 
@@ -706,8 +714,16 @@ def save_particles_table(filename, trajects, trim=None):
         # First trajectory creates the table:
         if table is None:
             # Format of records in a trajectory array :
-            fields = [('trajid', int, 1)] + [(field,) + desc \
-                for field, desc in traj.ext_schema().items()]
+            # Use np.int_ instead of int to avoid NumPy deprecation warning
+            fields = [('trajid', np.int_)]
+
+            # Handle the shape properly to avoid NumPy deprecation warning
+            for field, (dtype_type, shape) in traj.ext_schema().items():
+                if shape == 1:
+                    fields.append((field, dtype_type))
+                else:
+                    fields.append((field, dtype_type, (shape,)))
+
             dtype = np.dtype(fields)
             table = outfile.create_table('/', 'particles', dtype)
 
@@ -755,8 +771,16 @@ def save_frames_hdf(filename, frames):
         # First frame creates the table:
         if table is None:
             # Format of records in a frame array:
-            fields = [('time', int, 1)] + [(field,) + desc \
-                for field, desc in frame.ext_schema().items()]
+            # Use np.int_ instead of int to avoid NumPy deprecation warning
+            fields = [('time', np.int_)]
+
+            # Handle the shape properly to avoid NumPy deprecation warning
+            for field, (dtype_type, shape) in frame.ext_schema().items():
+                if shape == 1:
+                    fields.append((field, dtype_type))
+                else:
+                    fields.append((field, dtype_type, (shape,)))
+
             dtype = np.dtype(fields)
             table = outfile.create_table('/', 'particles', dtype)
 
@@ -787,8 +811,9 @@ def save_frames_hdf(filename, frames):
     table.cols.trajid.create_index()
     table.cols.time.create_index()
 
+    # Use scalar shape for each field
     bounds_tab = outfile.create_table('/', 'bounds',
-        np.dtype([('trajid', int, 1), ('first', int, 1), ('last', int, 1)]))
+        np.dtype([('trajid', int), ('first', int), ('last', int)]))
     for trid, bounds in ongoing_trajects.items():
         bounds_tab.append([(trid, bounds[0], bounds[1])])
     bounds_tab.cols.trajid.create_index()
