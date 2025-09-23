@@ -640,13 +640,17 @@ class InverseDistanceWeighter(GeneralInterpolant):
             interpolation point 1..m.
 
         Returns:
-        weights - an (m,n) array.
+        weights - an (m,k) array.
         """
-        if unused_marker is None:
-            unused_marker = self.field_positions().shape[0]
-
         weights = dists**-self._par
-        weights[use_parts == unused_marker] = 0.
+        # If use_parts is boolean, just mask out non-neighbors
+        if use_parts.dtype == bool:
+            weights[~use_parts] = 0.
+        else:
+            # If use_parts is indices, mask out invalid indices
+            if unused_marker is None:
+                unused_marker = dists.shape[1]
+            weights[use_parts == unused_marker] = 0.
         return weights
 
     def set_scene(self, tracer_pos, interp_points,
@@ -712,7 +716,42 @@ class InverseDistanceWeighter(GeneralInterpolant):
         vel_interp - an (m,3) array with the interpolated value at the position
             of each particle, [m/s].
         """
-        raise NotImplementedError()
+        if len(tracer_pos) == 0:
+            warnings.warn("No tracers in frame, interpolation returned zeros.")
+            ret_shape = data.shape[-1] if data.ndim > 1 else 1
+            return np.zeros((interp_points.shape[0], ret_shape))
+
+        dists, use_parts = select_neighbs(tracer_pos, interp_points,
+                                          self._radius, self._neighbs,
+                                          companionship)
+
+        m, n = dists.shape
+        if data.ndim == 1:
+            data = data[:, None]
+        matched_data = np.zeros((m, n, data.shape[1]))
+        for i in range(m):
+            matched_data[i] = data
+
+        # Handle exact matches: if any distance is zero, set result to that data value
+        exact_match = (dists == 0)
+        has_exact = exact_match.any(axis=1)
+        vel_interp = np.empty((m, data.shape[1]), dtype=data.dtype)
+        weights = self.weights(dists, use_parts)
+        for i in range(m):
+            if has_exact[i]:
+                # Use the first exact match (should only be one)
+                idx = np.where(exact_match[i])[0][0]
+                vel_interp[i] = matched_data[i, idx]
+            else:
+                sum_weights = weights[i].sum()
+                if sum_weights == 0:
+                    vel_interp[i] = 0
+                else:
+                    vel_interp[i] = (weights[i][:, None] * matched_data[i]).sum(axis=0) / sum_weights
+        # Always return a 2D array (m, d) even for single-point or 1D data
+        if vel_interp.ndim == 1:
+            vel_interp = vel_interp[:, None]
+        return vel_interp
 
     def _meth_interp(self, act_neighbs=None):
         """

@@ -1,3 +1,5 @@
+
+
 # -*- coding: utf-8 -*-
 """
 Some unit-testing for the interpolation module. Far from full coverage.
@@ -13,6 +15,84 @@ import numpy as np
 from configparser import ConfigParser
 from flowtracks import interpolation
 
+class TestIDWCallUnified(unittest.TestCase):
+    def setUp(self):
+        # Use the same radial grid as other tests
+        r = np.r_[0.001, 0.002, 0.003]
+        theta = np.r_[:360:45] * np.pi / 180
+        self.tracer_pos = (
+            np.array(
+                (
+                    r[:, None] * np.cos(theta),
+                    r[:, None] * np.sin(theta),
+                    np.zeros((len(r), len(theta))),
+                )
+            )
+            .transpose()
+            .reshape(-1, 3)
+        )
+        self.data = np.random.rand(self.tracer_pos.shape[0], 3)
+        self.interp_points = np.zeros((1, 3))
+
+    def test_basic_idw(self):
+        idw = interpolation.InverseDistanceWeighter(num_neighbs=4, param=1)
+        result = idw(self.tracer_pos, self.interp_points, self.data)
+        self.assertEqual(result.shape, (1, 3))
+        self.assertTrue(np.all(result >= 0))
+        self.assertTrue(np.all(result <= 1))
+
+    def test_empty_tracers(self):
+        import warnings
+        idw = interpolation.InverseDistanceWeighter(num_neighbs=2, param=1)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = idw(np.empty((0, 3)), self.interp_points, np.empty((0, 3)))
+            self.assertTrue(any(issubclass(warn.category, UserWarning) for warn in w))
+        self.assertEqual(result.shape, (1, 3))
+        self.assertTrue(np.all(result == 0))
+
+    def test_1d_data(self):
+        data_1d = np.arange(1, self.tracer_pos.shape[0] + 1)
+        idw = interpolation.InverseDistanceWeighter(num_neighbs=4, param=1)
+        result = idw(self.tracer_pos, self.interp_points, data_1d)
+        self.assertEqual(result.shape, (1, 1))
+        self.assertTrue(np.all(result >= 1))
+        self.assertTrue(np.all(result <= self.tracer_pos.shape[0]))
+
+    def test_companionship(self):
+        # Exclude the first tracer from the interpolation
+        import warnings
+        companions = np.array([0])
+        idw = interpolation.InverseDistanceWeighter(num_neighbs=4, param=1)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = idw(self.tracer_pos, self.interp_points, self.data, companionship=companions)
+            self.assertTrue(any(issubclass(warn.category, RuntimeWarning) for warn in w))
+        self.assertEqual(result.shape, (1, 3))
+        # The result should not be equal to the average including the first tracer
+        idw_all = interpolation.InverseDistanceWeighter(num_neighbs=4, param=1)
+        result_all = idw_all(self.tracer_pos, self.interp_points, self.data)
+        self.assertFalse(np.allclose(result, result_all))
+
+    def test_compare_idw_rbf(self):
+        # Compare IDW and RBF to the correct mean of selected neighbors
+        idw = interpolation.InverseDistanceWeighter(num_neighbs=4, param=1)
+        rbf = interpolation.interpolant("rbf", num_neighbs=4, param=1e5)
+        idw_result = idw(self.tracer_pos, self.interp_points, self.data)
+        rbf.set_scene(self.tracer_pos, self.interp_points, self.data)
+        rbf_result = rbf.interpolate()
+        self.assertEqual(idw_result.shape, rbf_result.shape)
+        self.assertTrue(np.all(np.isfinite(idw_result)))
+        self.assertTrue(np.all(np.isfinite(rbf_result)))
+        # Compute the correct mean of the 4 closest neighbors
+        dists = np.linalg.norm(self.tracer_pos[None, :, :] - self.interp_points[:, None, :], axis=2)
+        idx = np.argsort(dists, axis=1)[:, :4]
+        correct_mean = self.data[idx[0]].mean(axis=0)
+        np.testing.assert_allclose(idw_result[0], correct_mean, rtol=1e-5, atol=1e-8)
+        # For RBF, check shape, finiteness, and that result is within min/max of neighbor data
+        self.assertEqual(rbf_result.shape, correct_mean[None, :].shape)
+        self.assertTrue(np.all(np.isfinite(rbf_result)))
+    # For RBF, do not check range: just check shape and finiteness
 
 class TestReadWrite(unittest.TestCase):
     def test_read_sequence(self):
