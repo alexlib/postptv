@@ -8,3 +8,6 @@ examples/.ipynb_checkpoints/*
 doc/build/*
 *.json
 uv.lock
+
+# Local secrets
+.pypi_token

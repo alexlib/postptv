@@ -53,16 +53,31 @@ def bump_version(version_type):
     new_version = f"{major}.{minor}.{patch}"
     print(f"New version: {new_version}")
     
-    # Replace the version in the file
+    # Replace the version in __init__.py
     new_content = re.sub(
         r"__version__\s*=\s*['\"]([^'\"]*)['\"]",
         f"__version__ = '{new_version}'",
         content
     )
-    
-    # Write the updated content back to the file
     init_file.write_text(new_content)
-    print(f"Version bumped to {new_version}")
+    print(f"Updated flowtracks/__init__.py to version {new_version}")
+
+    # Also update version in pyproject.toml
+    pyproject_file = Path('pyproject.toml')
+    if pyproject_file.exists():
+        pyproject_content = pyproject_file.read_text()
+        if '[project]' in pyproject_content:
+            pyproject_new = re.sub(
+                r'version\s*=\s*["\"][^"\"]*["\"]',
+                f'version = "{new_version}"',
+                pyproject_content
+            )
+            pyproject_file.write_text(pyproject_new)
+            print(f"Updated pyproject.toml to version {new_version}")
+        else:
+            print("Warning: No [project] table found in pyproject.toml, version not updated there.")
+    else:
+        print("Warning: pyproject.toml not found, version not updated there.")
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
