@@ -13,7 +13,34 @@ flowtracks (this repo, package dir `flowtracks/`, version 1.1.1) is a pure-Pytho
 
 Expected outcome: 10–100× on interpolation and HDF5 iteration, order-of-magnitude on pairing, with the existing tests plus new benchmarks guarding correctness.
 
-## Ground rules for the implementer
+## Implementation status
+
+| Phase | Item | Status | Commit |
+|---|---|---|---|
+| – | WIP: analysis/io/scene/trajectory minor fixes | done | `8661635` |
+| 0 | Benchmark harness (`pytest-benchmark`, `benchmarks/`, `BASELINE.md`) | done | `66c3e9c` |
+| 1.1 | Vectorize `InverseDistanceWeighter.__call__` | done | `6945ad0` |
+| 1.2 | Kill loop in `neighb_dists` | done | `6945ad0` |
+| 1.3 | **KD-tree in `select_neighbs` (num_neighbs mode, tie-detection fallback)** | done | `2547d87` |
+| 1.4 | Batched `rbf_interp` solve | done | `6945ad0` |
+| 1.5 | `eulerian_jacobian` fast path | not started (optional) | – |
+| 2.1 | `io.trajectories_table` batch | done | `55ab4da` |
+| 2.2 | `Scene.iter_trajectories` batch | done | `55ab4da` |
+| 2.3 | `Scene.trajectory_by_id` | left as-is (plan rule) | – |
+| 2.4 | `Scene._iter_frame_arrays` batch + bug fix | done | `55ab4da` |
+| 2.5 | `AnalysedScene._iter_frame_arrays` batch | done | `55ab4da` |
+| 2.6 | `AnalysedScene.collect` membership | done | `55ab4da` |
+| 2.m | Memory guard (chunking) | not started (simple read) | – |
+| 3.1 | `pairs.particle_pairs` KD-tree + dicts | done | `f0f6c0c` |
+| 3.2 | `take_snapshot` inner loop | done (WIP) | `8661635` |
+| 3.3 | Hoist `start_times`/`end_times` at call sites | done | `f0f6c0c` |
+| 3.4 | `smoothing.savitzky_golay` vectorized + test | done | `f0f6c0c` |
+| 4 | Text-ingest vectorization + optional numba | not started (I/O-bound) | – |
+| V | Old-vs-new `git worktree` equivalence check | not started | – |
+| B | `requriments.txt` → `requirements.txt` rename | not started (low) | – |
+
+**Every Phase 1 item is now done.** The remaining open items are either
+optional (1.5, 4), out of scope (2.m), or verification-only (V, B).
 
 1. **Behavior preservation is the contract.** All public function signatures, return shapes/dtypes, and numerical results must be unchanged (`np.allclose` with tight tolerance; exact for integer outputs). The existing test suite (34 tests in `tests/`) must pass after every phase: `uv run pytest tests/`.
 2. **One phase = one commit (or a few logical commits).** Run benchmarks before and after each phase; an optimization that doesn't show a measured improvement gets dropped, not merged.
@@ -34,7 +61,7 @@ Expected outcome: 10–100× on interpolation and HDF5 iteration, order-of-magni
 | `flowtracks/smoothing.py` | 121 | Savitzky–Golay trajectory smoothing |
 | `flowtracks/analysis.py` | 146 | per-frame analysis driver (multiplies interpolation cost by frame count) |
 
-Tests: `tests/test_interp.py` (15), `tests/test_scene.py` (7), `tests/test_idw_call.py` (4), `tests/test_io.py` (4), `tests/test_analysis.py` (2), `tests/test_sequence.py` (2). Test data in `data/` (`data/tracers/ptv_is.10001..10115`, `data/seq_hdf.cfg`, HDF files). CI: `.github/workflows/python-package.yml`, Python 3.10–3.13.
+Tests: `tests/test_interp.py` (15), `tests/test_scene.py` (7), `tests/test_idw_call.py` (4), `tests/test_io.py` (4), `tests/test_analysis.py` (2), `tests/test_sequence.py` (2), `tests/test_smoothing.py` (3). Test data in `data/` (`data/tracers/ptv_is.10001..10200`, `data/seq_hdf.cfg`, HDF files). CI: `.github/workflows/python-package.yml`, Python 3.10–3.13.
 
 `flowtracks/future_idea_xarray_dask_zarr.py` is a non-imported prototype — **do not touch it**.
 
@@ -123,13 +150,220 @@ for pt in range(interp_points.shape[0]):
 
 Replace the whole body with a `cKDTree` query mirroring `_select_neighbs` (lines 338–365): build `cKDTree(tracer_pos)`, `query(interp_points, k+1)`, drop self/companion matches the same way `_select_neighbs` does (`keep = dists > 0`, companion filter, `keep[np.all(keep, axis=1), -1] = False`), return the `(m, min(n, k))` distance array. Preserve the current behavior for the `n < num_neighbs` case (returned width is `min(tracer_pos.shape[0], self._neighbs)`).
 
-### 1.3 KD-tree in `select_neighbs` itself (lines 52–77) for the `num_neighbs` mode
+### 1.3 KD-tree in `select_neighbs` itself (lines 52–77) for the `num_neighbs` mode — **DONE** (`2547d87`)
 
-`select_neighbs` returns dense `(m,n)` `dists` + boolean `use_parts` and is consumed by `GeneralInterpolant.__call__` (line 509), `rbf_interp`, `corrfun_interp`, and `_forego_laziness` (rbf branch, line 385). Options, in order of preference:
+**Status from prior sessions:** The naive KD-tree approach was implemented and
+then *reverted* (prior session).  The current commit applies the **conditional
+KD-tree with tie detection** strategy documented below.
 
-- **Keep the public signature and dense return** (it's documented API), but compute it tree-based when `num_neighbs` is given and `n` is large: `cKDTree(tracer_pos).query(interp_points, k=eff_num_neighbs+1)` to find neighbor indices, then scatter into the boolean `(m,n)` `use_parts` and fill only the needed entries of `dists` (leave non-neighbor entries 0 — check consumers: `corrfun_interp` indexes `dists[use_parts]` only; `rbf_interp` uses full `dists` in `np.exp(-dists**2*eps)` at line 141 but multiplies by `coeffs` that are zero outside neighborhoods, so only `dists[use_parts]` values matter — **verify this claim with a direct old-vs-new `allclose` test before relying on it**).
-- The `radius` mode (line 74, `use_parts = dists < radius`) genuinely needs many distances; use `cKDTree.query_ball_point` and fill sparsely, or leave the dense path for radius mode if the equivalence test gets hairy. Radius mode is less used; don't block the phase on it.
-- Must still honor the companionship exclusion (lines 57–59) and the `dists<=0 → inf → 0` round-trip semantics described in 1.1.
+`select_neighbs` returns dense `(m,n)` `dists` + boolean `use_parts` and is consumed by:
+- `GeneralInterpolant.__call__` (line 509)
+- `InverseDistanceWeighter.__call__` (line 724) — IDW
+- `rbf_interp` (line 131)
+- `corrfun_interp` (line 80)
+- `_forego_laziness` (rbf branch, line 385)
+
+The signature must stay `(m,n)` dense (documented API), but the underlying
+computation can be tree-based to avoid the `O(m·n)` `np.linalg.norm`.
+
+#### Why the naive KD-tree path breaks a pinned test
+
+**The blocking test:** `tests/test_interp.py::test_compare_idw_rbf`
+
+```python
+def setUp(self):
+    # 24 tracers on 3 radial rings × 8 angles
+    r = np.r_[0.001, 0.002, 0.003]
+    theta = np.r_[:360:45] * np.pi / 180   # 0°,45°,…,315°
+    self.tracer_pos = … .reshape(-1, 3)      # (24, 3)
+    self.data = np.random.rand(24, 3)
+    self.interp_points = np.zeros((1, 3))    # single query at origin
+
+def test_compare_idw_rbf(self):
+    idw = InverseDistanceWeighter(num_neighbs=4, param=1)
+    idw_result = idw(self.tracer_pos, self.interp_points, self.data)
+    dists = np.linalg.norm(…)                # (1, 24)
+    idx = np.argsort(dists, axis=1)[:, :4]   # ties at r=0.001 (8 points)
+    correct_mean = self.data[idx[0]].mean(axis=0)
+    np.testing.assert_allclose(idw_result[0], correct_mean, rtol=1e-5, atol=1e-8)
+```
+
+- The eight `r=0.001` tracers are **exactly equidistant** from the origin.
+- `np.argsort` on the full dense distances picks **four of them** — the first
+  four by column index **or** by `np.argsort`'s internal (deterministic)
+  tie-breaking. Which four depends on the numpy version / sort algorithm.
+- IDW with `param=1` assigns equal weight `1/0.001` to all four, so the
+  result equals their **simple mean**.
+- The test computes its reference the same way (`np.argsort` on the full
+  dense distances), so dense `select_neighbs` passes: they both select the
+  **same** four points.
+
+**Why cKDTree fails:**
+`cKDTree.query(origin, k=5)` returns the 5 nearest of the 8 equidistant
+points in an order determined by the KD-tree's internal data layout
+(tree-partition order, **not** column-index order).  The five returned
+indices are an **arbitrary 5-subset** of the 8, and their internal order
+does **not** equal `np.argsort`'s order over the full array.  Even
+recomputing exact distances for just the 5 candidates and re-sorting with
+`np.argsort` still gives a different four than the full-dense `np.argsort`,
+because the candidate *set* from cKDTree is a different 5 than the dense
+path's first four.
+
+**The result:** `idw_result[0]` uses different data rows than `correct_mean`
+→ `assert_allclose` fails with `O(1)` differences.
+
+#### Root cause
+
+When multiple points are exactly equidistant and the tie **crosses the
+`num_neighbs` boundary** (the [`num_neighbs`-th farthest selected
+neighbour] and the [`num_neighbs+1`-th farthest excluded one] are at the
+same distance), the neighbour set is *tie-order-dependent*.  The dense path
+picks `np.argsort`'s order; the KD-tree picks cKDTree's order, which is
+incompatible.
+
+When there is **no tie at the boundary**, the neighbour sets are identical
+(the multi-set of distances is identical), and every downstream consumer
+(IDW, RBF, corrfun) produces the same numerical result regardless of the
+order of the sorted distances.  The test always has a boundary tie (8
+equidistant, selecting 4), so it always fails.
+
+#### Recommended strategy: conditional KD-tree with tie detection
+
+Detect the tie-at-boundary condition cheaply from the KD-tree results.  If
+a tie exists on **any** query row, fall back to the dense `O(m·n)` path for
+**all** rows (ties are extremely rare in real continuous-valued data, so
+the amortised cost approaches `O(m log n)` on typical datasets).
+
+```python
+def select_neighbs(tracer_pos, interp_points, radius=None, num_neighbs=None,
+                   companionship=None):
+    # Dense path for: radius mode, n <= num_neighbs (companion-padding needed)
+    if radius is not None or (num_neighbs is not None
+                              and tracer_pos.shape[0] <= num_neighbs):
+        return _select_neighbs_dense(tracer_pos, interp_points,
+                                     radius, num_neighbs, companionship)
+
+    # KD-tree candidate query
+    tree = cKDTree(tracer_pos)
+    qdists, qidx = tree.query(interp_points, num_neighbs + 1)
+
+    # --- Boundary tie detection ---
+    # If any row has num_neighbs-th and (num_neighbs+1)-th distances equal,
+    # the neighbour set cannot be resolved by KD-tree alone — fall back to
+    # the full dense path to preserve exact tie-breaking.
+    if np.any(qdists[:, num_neighbs - 1] == qdists[:, num_neighbs]):
+        return _select_neighbs_dense(tracer_pos, interp_points,
+                                     radius, num_neighbs, companionship)
+
+    # --- KD-tree fast path ---
+    # (no boundary ties → neighbour set is uniquely determined, so the
+    #  KD-tree result is equivalent to the dense result)
+    return _fill_neighbs_from_kdtree(tracer_pos, interp_points,
+                                     qdists, qidx, num_neighbs, companionship)
+```
+
+**The three helpers:**
+
+| Helper | When | Complexity |
+|---|---|---|
+| `_select_neighbs_dense` | fallback (radius, `n≤k`, or tie) | `O(mn)` |
+| `_fill_neighbs_from_kdtree` | KD-tree, no tie | `O(m·k)` scatter |
+| (unchanged) | scene-path instance `_select_neighbs` | already `O(m·k)` |
+
+**`_fill_neighbs_from_kdtree` — pseudocode:**
+
+```python
+def _fill_neighbs_from_kdtree(tracer_pos, interp_points,
+                              qdists, qidx, num_neighbs, companionship):
+    m, n = interp_points.shape[0], tracer_pos.shape[0]
+    k = num_neighbs + 1
+
+    forbidden = qdists <= 0.
+    if companionship is not None:
+        comp = np.atleast_1d(companionship)
+        forbidden |= (qidx == comp[:, None])
+
+    # Stable argsort: among equal distances the *lowest index* in the query
+    # result wins; forbidden entries (self/companion) sort to the end.
+    order = np.argsort(np.where(forbidden, np.inf, qdists), axis=1,
+                       kind='stable')
+    sel = order[:, :num_neighbs]          # (m, num_neighbs)
+    rows = np.arange(m)[:, None]
+    chosen = qidx[rows, sel]
+    chosen_dists = np.where(forbidden[rows, sel], 0., qdists[rows, sel])
+
+    use_parts = np.zeros((m, n), dtype=bool)
+    use_parts[rows, chosen] = True
+    dists = np.zeros((m, n))
+    dists[rows, chosen] = chosen_dists
+    return dists, use_parts
+```
+
+**What about the `companionship` / exact-match zero-distances?**  
+The forbidden-mask logic reproduces the dense path's `inf → 0` round-trip:
+self and companion distances become 0 in the returned `dists`, and they are
+excluded from `use_parts` unless the tight `n ≤ num_neighbs` case forces
+their inclusion (that case always uses the dense fallback by the
+`n <= num_neighbs` guard).
+
+#### Acceptance
+
+- `tests/test_compare_idw_rbf` passes **unchanged** — the tie-detection
+  fallback guarantees the dense path runs for its equatorial-tie test case.
+- `tests/test_interp.py`, `tests/test_idw_call.py`, `tests/test_analysis.py`
+  all pass.
+- **Benchmark vs. baseline** (`pytest benchmarks/ --benchmark-compare`):
+  - `test_idw_call` (n=5000, m=2000) improves measurably over the current
+    post-Phase-1.1 numbers when no ties exist at the boundary.
+  - The tie-detection overhead is a single `np.any(…)` — negligible compared
+    to the saved `O(m·n)` `np.linalg.norm`.
+- **Additional regressions:** add an old-vs-new `allclose` equivalence test
+  on a random dataset with *guaranteed no ties* (e.g. `tracer_pos =
+  rng.random((5000, 3)) + np.arange(5000)[:, None] * 1e-12` so all distances
+  are distinct).  Compare `select_neighbs` output (dists + use_parts) between
+  old (dense-only) and new (KD-tree + tie-fallback) implementations;
+  assert they match element-wise.  This provides a regression guard that
+  survives future numpy version changes.
+
+#### Caveat: `tracer_dists` (tracer × tracer) always uses the dense path
+
+The sparse-fill KD-tree result (non-neighbour entries set to 0) is
+**insufficient** for the `tracer_dists` matrix computed by the RBF path:
+`rbf_interp` extracts kernel submatrices at arbitrary tracer-index pairs
+(the neighbours of *interpolation* points), which are **not** guaranteed
+to be mutual neighbours in the tracer–tracer distance matrix.  A 0 in a
+non-neighboured pair produces `exp(0·ε)=1` instead of the correct
+`exp(-true_dist·ε)` kernel value, which can make the RBF linear system
+singular.
+
+Therefore the two call sites that compute `tracer_dists` —
+`_forego_laziness` and `GeneralInterpolant.__call__` (RBF branch) — call
+`_select_neighbs_dense` directly instead of the dispatcher
+`select_neighbs`.
+
+This means the RBF standalone `__call__` path still computes the full
+`O(n²)` distance matrix for `tracer_dists` (n = number of tracers;
+typically much smaller than `m·n`).  The IDW `__call__` path, which does
+not need `tracer_dists`, benefits fully from the KD-tree.
+
+#### What if the tie-fallback happens too often on real data?
+
+Exact floating-point ties in 3D particle tracking data are essentially
+impossible (positions are measured in metres with micro-scale noise).  The
+only realistic source of ties is the **companionship exclusion** where a
+companion tracer shares a position with an interpolation point — but that
+produces distance `0.0`, which is handled by the `forbidden` mask and does
+**not** trigger the boundary-tie detector (the companion is within the
+`num_neighbs+1` query result, its distance is `0.0` distinct from non-zero
+distances).  So in practice the tie-fallback **never** triggers on real
+data.
+
+#### Remark: why not just fix the test?
+
+The plan's ground rules say "no test modifications."  The tie-detection
+approach keeps `select_neighbs` correct for *all* inputs, not just for the
+test, so it is the correct engineering solution even if the test were not a
+constraint.
 
 ### 1.4 Batch the `rbf_interp` solve loop (lines 131–143)
 
@@ -262,11 +496,16 @@ Keep the per-trajectory outer loop (trajectories are ragged). Add a direct old-v
 
 ---
 
-## Known bugs to fix along the way (all in touched code)
+## Known bugs along the way
 
-- `scene.py:231` — `'&'.join(query_string, cond)`: TypeError when `cond` given (fix in Phase 2).
-- `interpolation.py:505` — typo "No tracers im frame" (fix while editing `__call__`).
-- The `dists == 0` / companionship ambiguity in `select_neighbs` + IDW exact-match (do NOT change behavior; document as an issue).
+The following were fixed in prior phases:
+
+- `scene.py:231` — `'&'.join(query_string, cond)`: TypeError when `cond` given ✅ *(fixed in Phase 2)*
+- `interpolation.py:505` — typo "No tracers im frame" → "No tracers in frame" ✅ *(fixed in Phase 1)*
+
+Still open (document / defer):
+
+- The `dists == 0` / companionship ambiguity in `select_neighbs` + IDW exact-match — do NOT change behavior; document as an issue.
 - `requriments.txt` misspelling — optional rename, low priority, separate commit if done.
 
 ## Explicitly out of scope
@@ -277,7 +516,7 @@ Keep the per-trajectory outer loop (trajectories are ragged). Add a direct old-v
 
 ## Verification
 
-1. `uv run pytest tests/` green after every phase (34 tests).
+1. `uv run pytest tests/` green after every phase (36 tests).
 2. `uv run pytest benchmarks/ --benchmark-save=<phase>` + `--benchmark-compare` — record tables in `benchmarks/BASELINE.md`; drop any change without measured improvement.
 3. **End-to-end equivalence check** (temporary script, not committed): on the real dataset —
    - `iter_trajectories_ptvis('data/tracers/ptv_is.%d', ...)`: old vs new list of trajectories, compare `pos/velocity/time/trajid` arrays exactly;
