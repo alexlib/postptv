@@ -50,7 +50,7 @@ def select_neighbs(tracer_pos, interp_points, radius=None, num_neighbs=None,
         neighbour of interpolation point :math:`i=1...m`.
     """
     dists = np.linalg.norm(tracer_pos[None, :, :]-interp_points[:, None, :],
-                           axis=2)
+                            axis=2)
 
     # Only for selection phase,later changed back.
     dists[dists <= 0] = np.inf
@@ -132,11 +132,29 @@ def rbf_interp(tracer_dists, dists, use_parts, data, epsilon=1e-2):
 
     # Determine the set of coefficients for each particle:
     coeffs = np.zeros(dists.shape + (data.shape[-1],))
-    for pix in range(dists.shape[0]):
-        neighbs = np.nonzero(use_parts[pix])[0]
-        K = kernel[np.ix_(neighbs, neighbs)]
+    k_per_row = use_parts.sum(axis=1)
 
-        coeffs[pix, neighbs] = np.linalg.solve(K, data[neighbs])
+    # When ``use_parts`` is a boolean mask with the same fixed number of
+    # neighbours per point, solve all neighbour systems at once (numpy
+    # broadcasts the leading dimensions). If it is an index array (as passed by
+    # the lazy scene machinery) we keep the original per-point loop, which
+    # relies on np.nonzero() of the indices.
+    is_mask = (use_parts.dtype == np.bool_)
+
+    if is_mask and k_per_row.shape[0] > 0 \
+            and np.all(k_per_row == k_per_row[0]) and k_per_row[0] > 0:
+        k = int(k_per_row[0])
+        rows = np.arange(dists.shape[0])
+        nbrs = np.where(use_parts)[1].reshape(dists.shape[0], k)
+        K_stack = kernel[nbrs[:, :, None], nbrs[:, None, :]]   # (m,k,k)
+        data_stack = data[nbrs]                                # (m,k,d)
+        coeffs_stack = np.linalg.solve(K_stack, data_stack)    # (m,k,d)
+        coeffs[rows[:, None], nbrs] = coeffs_stack
+    else:
+        for pix in range(dists.shape[0]):
+            neighbs = np.nonzero(use_parts[pix])[0]
+            K = kernel[np.ix_(neighbs, neighbs)]
+            coeffs[pix, neighbs] = np.linalg.solve(K, data[neighbs])
 
     rbf = np.exp(-dists**2 * epsilon)
     vel_interp = np.sum(rbf[..., None] * coeffs, axis=1)
@@ -502,7 +520,7 @@ class GeneralInterpolant(object):
         # is impossible at that frame. This checks for frame tracking failure.
         if len(tracer_pos) == 0:
             # Temporary measure until I can safely discard frames.
-            warnings.warn("No tracers im frame, interpolation returned zeros.")
+            warnings.warn("No tracers in frame, interpolation returned zeros.")
             ret_shape = data.shape[-1] if data.ndim > 1 else 1
             return np.zeros((interp_points.shape[0], ret_shape))
 
@@ -576,13 +594,13 @@ class GeneralInterpolant(object):
             None, self._neighbs, companionship)
 
         nearest_tracers_count = min(tracer_pos.shape[0], self._neighbs)
-        ndists = np.zeros((interp_points.shape[0], nearest_tracers_count))
-
-        for pt in range(interp_points.shape[0]):
-            # allow assignment of less than the desired number of neighbours.
-            ndists[pt] = dists[pt, use_parts[pt]]
-
-        return ndists
+        # ``use_parts`` has exactly ``nearest_tracers_count`` True entries per
+        # row, so the flattened selection reshapes cleanly. The KD-tree path in
+        # ``select_neighbs`` fills only the active neighbour columns, leaving
+        # the rest at 0 -- which ``use_parts`` masks out, so the values read
+        # back here are identical to the dense computation.
+        return dists[use_parts].reshape(
+            interp_points.shape[0], nearest_tracers_count)
 
     def save_config(self, cfg):
         """
