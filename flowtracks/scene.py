@@ -103,8 +103,6 @@ class Scene(object):
     def trajectory_tags(self):
         tags = self._file.get_node('/bounds')
         return np.hstack([tags.col(name)[:,None] for name in ['trajid', 'first', 'last']])
-            
-        return np.array([np.int64(row[:]) for row in self._file.get_node('/bounds').read()])
     
     def set_frame_range(self, frame_range):
         """
@@ -272,13 +270,11 @@ class Scene(object):
             # find continuing trajectories:
             arr_trids = arr['trajid']
             next_arr_trids = next_arr['trajid']
-            trajids = set(arr_trids) & set(next_arr_trids)
+            trajids = np.intersect1d(arr_trids, next_arr_trids, assume_unique=True)
             
             # select only those from the two frames:
-            in_arr = np.array([True if tr in trajids else False \
-                for tr in arr_trids])
-            in_next_arr = np.array([True if tr in trajids else False \
-                for tr in next_arr_trids])
+            in_arr = np.in1d(arr_trids, trajids, assume_unique=True)
+            in_next_arr = np.in1d(next_arr_trids, trajids, assume_unique=True)
             
             if len(in_arr) > 0:
                 arr = arr[in_arr]

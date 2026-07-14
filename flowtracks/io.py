@@ -327,7 +327,7 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
     if ending.any():
         ending_trids = np.atleast_1d(frame[ending,-1].astype(np.int_))
         for trid in ending_trids:
-            trajects[trid] = frame[frame[:,-1] == trid]
+            trajects[trid] = frame[trid:trid+1]
 
     frame_buffer_start = 0
 
@@ -399,10 +399,25 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
             if past_frame is None: continue
 
             in_frame = ending_starts <= scanix + frame_buffer_start
-            for trid in ending_trids[in_frame]:
+            active_ending_trids = ending_trids[in_frame]
+            if len(active_ending_trids) == 0: continue
+            
+            trids_in_past = past_frame[:,-1].astype(np.int_)
+            sort_ix = np.argsort(trids_in_past)
+            sorted_trids = trids_in_past[sort_ix]
+            
+            locs = np.searchsorted(sorted_trids, active_ending_trids)
+            valid = locs < len(sorted_trids)
+            matched = valid.copy()
+            if matched.any():
+                matched[valid] = sorted_trids[locs[valid]] == active_ending_trids[valid]
+                
+            valid_active_trids = active_ending_trids[matched]
+            valid_row_ixs = sort_ix[locs[matched]]
+            
+            for trid, row_ix in zip(valid_active_trids, valid_row_ixs):
                 traj_rel_ix = scanix + frame_buffer_start - traj_starts[trid]
-                traj_locator = past_frame[:,-1] == trid
-                trajects[trid][traj_rel_ix] = past_frame[traj_locator][0]
+                trajects[trid][traj_rel_ix] = past_frame[row_ix]
 
         # Discard frames that only have trajectories that ended.
         cont_trids = frame[~ending,-1]

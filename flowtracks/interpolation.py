@@ -728,26 +728,23 @@ class InverseDistanceWeighter(GeneralInterpolant):
         m, n = dists.shape
         if data.ndim == 1:
             data = data[:, None]
-        matched_data = np.zeros((m, n, data.shape[1]))
-        for i in range(m):
-            matched_data[i] = data
-
-        # Handle exact matches: if any distance is zero, set result to that data value
+            
         exact_match = (dists == 0)
         has_exact = exact_match.any(axis=1)
-        vel_interp = np.empty((m, data.shape[1]), dtype=data.dtype)
+        vel_interp = np.zeros((m, data.shape[1]), dtype=data.dtype)
         weights = self.weights(dists, use_parts)
-        for i in range(m):
-            if has_exact[i]:
-                # Use the first exact match (should only be one)
-                idx = np.where(exact_match[i])[0][0]
-                vel_interp[i] = matched_data[i, idx]
-            else:
-                sum_weights = weights[i].sum()
-                if sum_weights == 0:
-                    vel_interp[i] = 0
-                else:
-                    vel_interp[i] = (weights[i][:, None] * matched_data[i]).sum(axis=0) / sum_weights
+        
+        sum_weights = weights.sum(axis=1)
+        valid = (sum_weights != 0) & (~has_exact)
+        
+        if valid.any():
+            vel_interp[valid] = (weights[valid] @ data) / sum_weights[valid, None]
+            
+        if has_exact.any():
+            row_idx = np.where(has_exact)[0]
+            col_idx = np.argmax(exact_match[has_exact], axis=1)
+            vel_interp[row_idx] = data[col_idx]
+            
         # Always return a 2D array (m, d) even for single-point or 1D data
         if vel_interp.ndim == 1:
             vel_interp = vel_interp[:, None]
