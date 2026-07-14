@@ -851,16 +851,31 @@ def trajectories_table(fname, first=None, last=None):
     outfile = tables.open_file(fname, mode='r')
     table = outfile.get_node('/particles')
 
-    query_string = ('(trajid == trid)')
+    conds = []
     if first is not None:
-        query_string += " & (time >= %d)" % first
+        conds.append("(time >= %d)" % first)
     if last is not None:
-        query_string += " & (time <= %d)" % last
+        conds.append("(time <= %d)" % last)
+    read_cond = ' & '.join(conds)
+
+    # Read the whole (possibly time-filtered) table once, then group by trajid
+    # in memory, instead of one ``read_where`` query per trajectory id.
+    arr = table.read_where(read_cond) if read_cond else table.read()
+
+    all_trids = np.unique(table.col('trajid'))
+    order = np.argsort(arr['trajid'], kind='stable')
+    arr = arr[order]
+    bounds = np.flatnonzero(np.diff(arr['trajid'])) + 1
+    groups = np.split(arr, bounds)
+    by_trid = {int(g['trajid'][0]): g for g in groups}
 
     trajects = []
-    for trid in np.unique(table.col('trajid')):
-        arr = table.read_where(query_string)
-        kwds = dict((field, arr[field]) for field in arr.dtype.fields \
+    # Iterate over every trajid present in the file (matching the old per-id
+    # query loop, which also appended an empty Trajectory for ids that fall
+    # outside the time range).
+    for trid in all_trids:
+        chunk = by_trid.get(int(trid), arr[0:0])
+        kwds = dict((field, chunk[field]) for field in chunk.dtype.fields \
             if field != 'trajid')
         kwds['trajid'] = trid
         trajects.append(Trajectory(**kwds))

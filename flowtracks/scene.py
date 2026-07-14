@@ -193,16 +193,25 @@ class Scene(object):
     def iter_trajectories(self):
         """
         Iterator over trajectories. Generates a Trajectory object for each 
-        trajectory in the file (in no particular order, but the same order 
-        every time on the same PyTables version) and yields it.
+        trajectory in the file (in ``self._trids`` order) and yields it.
         """
-        query_string = '(trajid == trid)'
         if self._frame_limit != '':
-            query_string += ' & ' + self._frame_limit
-        
+            arr = self._table.read_where(self._frame_limit)
+        else:
+            arr = self._table.read()
+
+        # Read once, then group by trajid in memory, instead of issuing one
+        # ``read_where`` query per trajectory id.
+        order = np.argsort(arr['trajid'], kind='stable')
+        arr = arr[order]
+        bounds = np.flatnonzero(np.diff(arr['trajid'])) + 1
+        groups = np.split(arr, bounds)
+        by_trid = {int(g['trajid'][0]): g for g in groups}
+        empty = arr[0:0]
+
         for trid in self._trids:
-            arr = self._table.read_where(query_string)
-            kwds = dict((field, arr[field]) for field in arr.dtype.fields \
+            chunk = by_trid.get(int(trid), empty)
+            kwds = dict((field, chunk[field]) for field in chunk.dtype.fields \
                 if field != 'trajid')
             kwds['trajid'] = trid
             yield Trajectory(**kwds)
@@ -222,16 +231,29 @@ class Scene(object):
         """
         Private. Like iter_frames but does not create a ParticleSnapshot
         object, leaving the raw array. Also allows heavier filtering.
-        
+
         Arguments:
-        cond - an optional PyTables condition string to apply to each frame.
+        cond - an optional PyTables condition string to AND into the single
+            read performed over the whole frame range.
         """
-        query_string = '(time == t)'
+        read_cond = "(time >= %d) & (time < %d)" % (self._first, self._last)
         if cond is not None:
-            query_string = '&'.join(query_string, cond)
-            
+            read_cond = "(%s) & (%s)" % (read_cond, cond)
+
+        # Read the whole range once, then group by frame number, instead of one
+        # ``read_where`` per frame. Yields one array per frame in the range,
+        # including empty arrays for frames that contain no rows (this keeps
+        # ``iter_segments``' consecutive-frame pairing intact).
+        arr = self._table.read_where(read_cond)
+        order = np.argsort(arr['time'], kind='stable')
+        arr = arr[order]
+        bounds = np.flatnonzero(np.diff(arr['time'])) + 1
+        groups = np.split(arr, bounds)
+        by_time = {int(g['time'][0]): g for g in groups}
+        empty = arr[0:0]
+
         for t in range(self._first, self._last):
-            yield t, self._table.read_where(query_string)
+            yield t, by_time.get(t, empty)
     
     def frame_by_time(self, t):
         """
