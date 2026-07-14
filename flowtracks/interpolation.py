@@ -49,10 +49,33 @@ def select_neighbs(tracer_pos, interp_points, radius=None, num_neighbs=None,
     use_parts - (m,n) boolean array, True where tracer :math:`j=1...n` is a
         neighbour of interpolation point :math:`i=1...m`.
     """
-    dists = np.linalg.norm(tracer_pos[None, :, :]-interp_points[:, None, :],
+    n = tracer_pos.shape[0]
+    m = interp_points.shape[0]
+
+    # --- Path selection ---
+    # KD-tree path: only when num_neighbs is given, no radius, and n is large
+    # enough that the companion-padding edge case (n <= num_neighbs) is avoided.
+    if radius is None and num_neighbs is not None and n > num_neighbs:
+        return _select_neighbs_kdtree(tracer_pos, interp_points,
+                                      num_neighbs, companionship)
+
+    # Dense fallback: radius mode, n <= num_neighbs, or no num_neighbs.
+    return _select_neighbs_dense(tracer_pos, interp_points,
+                                 radius, num_neighbs, companionship)
+
+
+def _select_neighbs_dense(tracer_pos, interp_points, radius=None,
+                          num_neighbs=None, companionship=None):
+    """
+    Original O(m·n) dense selection.  Always produces the exact return that the
+    public ``select_neighbs`` documents, and is kept as the fallback for radius
+    mode, the n ≤ num_neighbs companion-padding case, and whenever a boundary
+    distance tie makes the KD-tree result ambiguous.
+    """
+    dists = np.linalg.norm(tracer_pos[None, :, :] - interp_points[:, None, :],
                             axis=2)
 
-    # Only for selection phase,later changed back.
+    # Only for selection phase, later changed back.
     dists[dists <= 0] = np.inf
     if companionship is not None:
         cif = companionship >= 0.  # companion in frame
@@ -74,6 +97,62 @@ def select_neighbs(tracer_pos, interp_points, radius=None, num_neighbs=None,
         use_parts = dists < radius
 
     dists[np.isinf(dists)] = 0.
+    return dists, use_parts
+
+
+def _select_neighbs_kdtree(tracer_pos, interp_points, num_neighbs,
+                           companionship=None):
+    """
+    KD-tree accelerated neighbour selection for the ``num_neighbs`` mode when
+    ``n > num_neighbs``.
+
+    1. Query the KD-tree for ``num_neighbs + 1`` candidates.
+    2. Re-compute exact pairwise distances for those candidates only (matching
+       the formula used by the dense path – cheap at O(m·k)).
+    3. If a tie exists at the selection boundary (the ``num_neighbs``-th and
+       ``num_neighbs+1``-th exact distances are equal), fall back to the dense
+       path because the neighbour set becomes tie-order-dependent.
+    4. Otherwise scatter the exact distances into the dense (m,n) output arrays.
+    """
+    n = tracer_pos.shape[0]
+    m = interp_points.shape[0]
+
+    tree = cKDTree(tracer_pos)
+    _, qidx = tree.query(interp_points, num_neighbs + 1)  # (m, k) indices
+
+    # Exact distances for the k candidates (same formula as the dense path).
+    delta = tracer_pos[qidx] - interp_points[:, None, :]  # (m, k, 3)
+    exact_dists = np.sqrt(np.sum(delta * delta, axis=-1))  # (m, k)
+
+    # If any row has a tie at the selection boundary, the neighbour set is
+    # tie-order-dependent – fall back to dense where np.argsort determines it.
+    if np.any(exact_dists[:, num_neighbs - 1] == exact_dists[:, num_neighbs]):
+        return _select_neighbs_dense(tracer_pos, interp_points,
+                                     radius=None, num_neighbs=num_neighbs,
+                                     companionship=companionship)
+
+    # No boundary tie → the set of num_neighbs nearest neighbours is
+    # uniquely determined.  Scatter into the public return format.
+    forbidden = exact_dists <= 0.
+    if companionship is not None:
+        comp = np.atleast_1d(companionship)
+        forbidden |= (qidx == comp[:, None])
+
+    # Stable argsort: non-forbidden entries sort by distance (ascending),
+    # then forbidden entries sort to the end (they become distance-0
+    # padding, exactly matching the dense inf → 0 round-trip).
+    order = np.argsort(np.where(forbidden, np.inf, exact_dists), axis=1,
+                       kind='stable')
+    sel = order[:, :num_neighbs]          # (m, num_neighbs)
+    rows = np.arange(m)[:, None]
+    chosen = qidx[rows, sel]
+    chosen_dists = np.where(forbidden[rows, sel], 0.,
+                            exact_dists[rows, sel])
+
+    use_parts = np.zeros((m, n), dtype=bool)
+    use_parts[rows, chosen] = True
+    dists = np.zeros((m, n))
+    dists[rows, chosen] = chosen_dists
     return dists, use_parts
 
 
@@ -400,7 +479,7 @@ class GeneralInterpolant(object):
         self.__rel_pos = matched_pos - self.__interp_pts[:, None, :]
 
         if self._method == 'rbf':
-            self.__tracer_dists, _ = select_neighbs(
+            self.__tracer_dists, _ = _select_neighbs_dense(
                 self.__tracers, self.__tracers, self._radius, self._neighbs,
                 self.__comp)
 
@@ -529,7 +608,7 @@ class GeneralInterpolant(object):
                                           companionship)
 
         if self._method == 'rbf':
-            tracer_dists = select_neighbs(tracer_pos, tracer_pos,
+            tracer_dists = _select_neighbs_dense(tracer_pos, tracer_pos,
                 self._radius, self._neighbs, companionship)[0]
             return rbf_interp(tracer_dists, dists, use_parts, data, self._par)
 
