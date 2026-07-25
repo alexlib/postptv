@@ -68,8 +68,8 @@ def savitzky_golay(trajs, fps, window_size, order):
     m = np.linalg.pinv(b)
     m_pos = m[0]
     m_vel = m[1] * fps
-    m_acc = m[2] * (fps**2 * 2)
-    m_jerk = m[3] * (fps**3 * 6)
+    m_acc = m[2] * (fps**2 * 2) if order >= 2 else np.zeros(window_size)
+    m_jerk = m[3] * (fps**3 * 6) if order >= 3 else np.zeros(window_size)
 
     # Coefficient rows, reused for every component and every output derivative
     # (pos/vel/acc/jerk). Multiplying a windowed view of the padded signal by
