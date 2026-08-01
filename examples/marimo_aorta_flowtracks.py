@@ -1,9 +1,7 @@
 import marimo
 
-__generated_with = "0.23.14"
-app = marimo.App(
-    width="full",
-)
+__generated_with = "0.23.15"
+app = marimo.App(width="full")
 
 
 @app.cell
@@ -17,29 +15,19 @@ def _():
     from flowtracks.stitching import stitch_trajectories
     from flowtracks.smoothing import savitzky_golay
 
-    return (
-        Axes3D,
-        flowtracks,
-        mo,
-        np,
-        plt,
-        savitzky_golay,
-        stitch_trajectories,
-    )
+    return flowtracks, mo, np, plt, savitzky_golay, stitch_trajectories
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # 🌊 Flowtracks Trajectory Post-Processing: TT13_aorta Dataset
-        This interactive notebook loads 3D particle trajectories from OpenPTV output (`ptv_is.*` files) 
-        and performs:
-        1. **Raw Trajectories Inspection**
-        2. **Gap Stitching / Relinking** (`flowtracks.stitching.stitch_trajectories`)
-        3. **Savitzky-Golay Smoothing & Kinematic Derivatives** (`flowtracks.smoothing.savitzky_golay`)
-        """
-    )
+    mo.md("""
+    # 🌊 Flowtracks Trajectory Post-Processing: TT13_aorta Dataset
+    This interactive notebook loads 3D particle trajectories from OpenPTV output (`ptv_is.*` files)
+    and performs:
+    1. **Raw Trajectories Inspection**
+    2. **Gap Stitching / Relinking** (`flowtracks.stitching.stitch_trajectories`)
+    3. **Savitzky-Golay Smoothing & Kinematic Derivatives** (`flowtracks.smoothing.savitzky_golay`)
+    """)
     return
 
 
@@ -70,7 +58,6 @@ def _(mo):
     ])
     return (
         fname_pattern,
-        res_dir,
         ui_color_by,
         ui_fps,
         ui_max_dist,
@@ -84,8 +71,8 @@ def _(mo):
 
 @app.cell
 def _(
-    fname_pattern,
     flowtracks,
+    fname_pattern,
     savitzky_golay,
     stitch_trajectories,
     ui_fps,
@@ -121,8 +108,7 @@ def _(
         window_size=w_size,
         order=poly_ord,
     )
-
-    return fps_val, poly_ord, raw_trajs, smoothed_trajs, stitched_trajs, w_size
+    return raw_trajs, smoothed_trajs, stitched_trajs
 
 
 @app.cell
@@ -165,21 +151,11 @@ def _(mo, np, raw_trajs, smoothed_trajs, stitched_trajs):
     | **3. Stitched + SG Smoothed** | {s_smoothed['count']} | {s_smoothed['mean_len']} | {s_smoothed['max_len']} | {s_smoothed['mean_speed']} | {s_smoothed['max_acc']} |
     """
     mo.md(table_md)
-    return compute_stats, s_raw, s_smoothed, s_stitched, table_md
+    return
 
 
 @app.cell
-def _(
-    Axes3D,
-    mo,
-    np,
-    plt,
-    raw_trajs,
-    smoothed_trajs,
-    stitched_trajs,
-    ui_color_by,
-    ui_num_display,
-):
+def _(mo, np, plt, raw_trajs, stitched_trajs, ui_color_by, ui_num_display):
     N_disp = int(ui_num_display.value)
     color_choice = ui_color_by.value
 
@@ -218,19 +194,11 @@ def _(
 
     fig.tight_layout()
     mo.hstack([fig])
-    return N_disp, ax1, ax2, color_choice, fig, plot_trajs_on_ax
+    return
 
 
 @app.cell
-def _(
-    Axes3D,
-    mo,
-    np,
-    plt,
-    smoothed_trajs,
-    stitched_trajs,
-    ui_num_display,
-):
+def _(mo, plt, smoothed_trajs, stitched_trajs, ui_num_display):
     N_disp2 = int(ui_num_display.value)
     fig2 = plt.figure(figsize=(15, 6), dpi=100)
 
@@ -257,7 +225,7 @@ def _(
 
     fig2.tight_layout()
     mo.hstack([fig2])
-    return N_disp2, ax3, ax4, fig2
+    return
 
 
 @app.cell
@@ -294,7 +262,7 @@ def _(mo, np, plt, raw_trajs, smoothed_trajs):
 
     fig_kin.tight_layout()
     mo.hstack([fig_kin])
-    return ax_a, ax_v, fig_kin, raw_accs, raw_speeds, sm_accs, sm_speeds
+    return
 
 
 if __name__ == "__main__":
