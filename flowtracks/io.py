@@ -473,7 +473,7 @@ def trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
     return [t for t in iter_trajectories_ptvis(fname, first, last, frate,
         xuap, traj_min_len)]
 
-def trajectories(fname, first, last, frate, fmt=None, traj_min_len=None,
+def trajectories(fname, first=None, last=None, frate=1.0, fmt=None, traj_min_len=None,
     iter_allowed=False):
     """
     Extract all trajectories in a given target location. The location format
@@ -531,6 +531,9 @@ def trajectories(fname, first, last, frate, fmt=None, traj_min_len=None,
         else:
             traj = [t for t in it]
 
+    elif fmt == 'zarr':
+        traj = read_zarr_trajectories(fname, first, last)
+
     if filter_needed:
         if traj_min_len is None:
             traj_min_len = 2
@@ -551,9 +554,11 @@ def infer_format(fname):
 
     Returns:
     A string marking the format. Currently one of 'acc', 'mat', 'xuap',
-    'npz', 'hdf' or 'ptvis'.
+    'npz', 'hdf', 'zarr', or 'ptvis'.
     """
-    if fname.endswith('mat'):
+    if fname.endswith('zarr') or fname.endswith('zarr/') or '.zarr' in fname:
+        return 'zarr'
+    elif fname.endswith('mat'):
         return 'mat'
     elif fname.endswith('/'):
         return 'npz'
@@ -939,3 +944,169 @@ def load_trajectories(res_dir, first=None, last=None):
         trajects.append(Trajectory(**kwds))
 
     return trajects, per_traject_adds
+
+
+def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories"):
+    """
+    Extract all trajectories from a Zarr store directory.
+
+    Arguments:
+    zarr_path - path to the .zarr directory or Zarr group.
+    first, last - inclusive range of frame numbers to read.
+    group - sub-group name inside the Zarr store ('trajectories' or
+            'trajectories/smoothed' or 'correspondences').
+
+    Returns:
+    trajects - a list of Trajectory objects.
+    """
+    import zarr
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    target_group = root[group] if group in root else root
+
+    # Case 1: Structured dataset in /trajectories (arrays: pos, vel, accel, time, trajid)
+    if "trajid" in target_group:
+        trajid_arr = np.asarray(target_group["trajid"])
+        time_arr = np.asarray(target_group["time"])
+        pos_arr = np.asarray(target_group["pos"])
+
+        vel_arr = np.asarray(target_group["vel"]) if "vel" in target_group else None
+        accel_arr = np.asarray(target_group["accel"]) if "accel" in target_group else None
+
+        # Filter frame range
+        mask = np.ones(len(time_arr), dtype=bool)
+        if first is not None:
+            mask &= time_arr >= first
+        if last is not None:
+            mask &= time_arr <= last
+
+        trajid_arr = trajid_arr[mask]
+        time_arr = time_arr[mask]
+        pos_arr = pos_arr[mask]
+        if vel_arr is not None:
+            vel_arr = vel_arr[mask]
+        if accel_arr is not None:
+            accel_arr = accel_arr[mask]
+
+        # Group by trajid
+        unique_trids = np.unique(trajid_arr)
+        trajects = []
+
+        for trid in unique_trids:
+            idx = np.where(trajid_arr == trid)[0]
+            if len(idx) == 0:
+                continue
+            vel_val = vel_arr[idx] if vel_arr is not None else np.zeros_like(pos_arr[idx])
+            kws = {}
+            if accel_arr is not None:
+                kws["accel"] = accel_arr[idx]
+
+            trajects.append(Trajectory(pos_arr[idx], vel_val, time_arr[idx], int(trid), **kws))
+
+        return trajects
+
+    # Case 2: Reading frame-by-frame 3D correspondences from openptv2 (e.g., correspondences/frame_10000)
+    elif "correspondences" in root or group == "correspondences":
+        corr_group = root["correspondences"] if "correspondences" in root else root
+        frame_keys = sorted(
+            [k for k in corr_group.keys() if k.startswith("frame_")],
+            key=lambda k: int(k.split("_")[1])
+        )
+
+        all_points = []
+        for fkey in frame_keys:
+            frame_num = int(fkey.split("_")[1])
+            if first is not None and frame_num < first:
+                continue
+            if last is not None and frame_num > last:
+                continue
+
+            arr = np.asarray(corr_group[fkey])
+            if len(arr) == 0:
+                continue
+            for row in arr:
+                pt_x, pt_y, pt_z = row[0], row[1], row[2]
+                pt_id = int(row[3]) if len(row) > 3 else 0
+                all_points.append((pt_x, pt_y, pt_z, frame_num, pt_id if pt_id != -1 else 0))
+
+        if len(all_points) == 0:
+            return []
+
+        pts = np.array(all_points)
+
+        unique_trids = np.unique(pts[:, 4].astype(int))
+        trajects = []
+        for trid in unique_trids:
+            idx = np.where(pts[:, 4].astype(int) == trid)[0]
+            if len(idx) < 2:
+                continue
+            sort_idx = idx[np.argsort(pts[idx, 3])]
+            p_pos = pts[sort_idx, :3]
+            p_time = pts[sort_idx, 3].astype(int)
+            p_vel = np.zeros_like(p_pos)
+            trajects.append(Trajectory(p_pos, p_vel, p_time, int(trid)))
+
+        return trajects
+
+    return []
+
+
+def save_zarr_trajectories(trajects, zarr_path, group="trajectories", overwrite=True):
+    """
+    Save a list of Trajectory objects into a Zarr directory store.
+
+    Arguments:
+    trajects - list of Trajectory objects.
+    zarr_path - path to the target .zarr directory.
+    group - sub-group name inside the Zarr store.
+    overwrite - if True, overwrite existing arrays in the group.
+    """
+    import zarr
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    target_group = root.require_group(group)
+
+    if len(trajects) == 0:
+        return
+
+    all_pos = []
+    all_vel = []
+    all_accel = []
+    all_time = []
+    all_trajid = []
+
+    has_vel = False
+    has_accel = False
+
+    for tr in trajects:
+        n = len(tr)
+        all_pos.append(tr.pos())
+        all_time.append(tr.time())
+        all_trajid.append(np.full(n, tr.trajid(), dtype=np.int64))
+
+        if hasattr(tr, "velocity") and tr.velocity() is not None:
+            all_vel.append(tr.velocity())
+            has_vel = True
+        elif hasattr(tr, "vel") and tr.vel() is not None:
+            all_vel.append(tr.vel())
+            has_vel = True
+        if hasattr(tr, "accel") and tr.accel() is not None:
+            all_accel.append(tr.accel())
+            has_accel = True
+
+    pos_arr = np.vstack(all_pos)
+    time_arr = np.concatenate(all_time)
+    trajid_arr = np.concatenate(all_trajid)
+
+    target_group.create_array("pos", data=pos_arr, overwrite=overwrite)
+    target_group.create_array("time", data=time_arr, overwrite=overwrite)
+    target_group.create_array("trajid", data=trajid_arr, overwrite=overwrite)
+
+    if has_vel and len(all_vel) == len(trajects):
+        vel_arr = np.vstack(all_vel)
+        target_group.create_array("vel", data=vel_arr, overwrite=overwrite)
+
+    if has_accel and len(all_accel) == len(trajects):
+        accel_arr = np.vstack(all_accel)
+        target_group.create_array("accel", data=accel_arr, overwrite=overwrite)
+
