@@ -30,6 +30,11 @@ setup(
     packages=find_packages(),
     data_files=[('flowtracks-examples', glob('examples/*'))],
     scripts=['scripts/analyse_fhdf.py'],
+    entry_points={
+        'console_scripts': [
+            'postptv-combine = flowtracks.combine:main',
+        ],
+    },
     install_requires=[
         'numpy',
         'scipy',
