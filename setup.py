@@ -5,6 +5,7 @@ Installation script for the Flowtracks package.
 @author: yosef
 """
 
+import os
 import re
 from pathlib import Path
 from setuptools import setup, find_packages
@@ -28,7 +29,7 @@ setup(
     author_email='yosefm@gmail.com',
     url='https://github.com/OpenPTV/postptv',
     packages=find_packages(),
-    data_files=[('flowtracks-examples', glob('examples/*'))],
+    data_files=[('flowtracks-examples', [f for f in glob('examples/*') if os.path.isfile(f)])],
     scripts=['scripts/analyse_fhdf.py'],
     entry_points={
         'console_scripts': [
