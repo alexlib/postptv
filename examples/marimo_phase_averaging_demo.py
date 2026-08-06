@@ -55,12 +55,22 @@ def _(mo):
         mo.hstack([peak_a_ui, amp_a_ui], gap=2),
         mo.hstack([peak_b_ui, amp_b_ui], gap=2),
     ])
-    return amp_a_ui, amp_b_ui, n_frames_ui, noise_ui, peak_a_ui, peak_b_ui, ref_phase_ui
+    return (
+        amp_a_ui,
+        amp_b_ui,
+        n_frames_ui,
+        noise_ui,
+        peak_a_ui,
+        peak_b_ui,
+        ref_phase_ui,
+    )
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## Step 0 — synthetic uniform-direction pulsatile flow""")
+    mo.md(r"""
+    ## Step 0 — synthetic uniform-direction pulsatile flow
+    """)
     return
 
 
@@ -87,12 +97,14 @@ def _(amp_a_ui, amp_b_ui, n_frames_ui, noise_ui, np, peak_a_ui, peak_b_ui, xr):
 
     set_a = set_dataset(peak_a_ui.value, amp_a_ui.value, noise_ui.value)
     set_b = set_dataset(peak_b_ui.value, amp_b_ui.value, noise_ui.value)
-    return N, bump, set_a, set_b
+    return N, set_a, set_b
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## Step 1 — peak selection (`argmax`, per set)""")
+    mo.md(r"""
+    ## Step 1 — peak selection (`argmax`, per set)
+    """)
     return
 
 
@@ -140,7 +152,14 @@ def _(mo):
 
 
 @app.cell
-def _(N, detected_peak_a, detected_peak_b, ref_phase_ui, set_a, set_b, shift_phase):
+def _(
+    detected_peak_a,
+    detected_peak_b,
+    ref_phase_ui,
+    set_a,
+    set_b,
+    shift_phase,
+):
     shift_a = ref_phase_ui.value - detected_peak_a
     shift_b = ref_phase_ui.value - detected_peak_b
 
@@ -150,7 +169,19 @@ def _(N, detected_peak_a, detected_peak_b, ref_phase_ui, set_a, set_b, shift_pha
 
 
 @app.cell
-def _(N, aligned_a, aligned_b, mo, np, plt, ref_phase_ui, set_a, set_b, shift_a, shift_b):
+def _(
+    N,
+    aligned_a,
+    aligned_b,
+    mo,
+    np,
+    plt,
+    ref_phase_ui,
+    set_a,
+    set_b,
+    shift_a,
+    shift_b,
+):
     def polar_ax(ax, ds, peak_frame, shift, title, color):
         angles = 2 * np.pi * ds["phase"].values / N
         r = ds["u"].values
