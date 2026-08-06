@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -167,7 +168,7 @@ def test_weighted_phase_average():
 
 
 def test_binary_vtk_round_trip(tmp_path):
-    import vtk
+    vtk = pytest.importorskip("vtk")
     from vtk.util import numpy_support
 
     ds = xr.Dataset(

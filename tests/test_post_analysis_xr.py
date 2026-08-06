@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 import yaml
 
@@ -111,6 +112,7 @@ def test_eulerian_grid_bins_particles():
 
 
 def test_recipe_run_end_to_end(tmp_path):
+    pytest.importorskip("vtk")
     _write_grid(tmp_path / "a_grid.h5", 1.0)
     _write_grid(tmp_path / "b_grid.h5", 3.0)
     recipe = tmp_path / "recipe.yaml"

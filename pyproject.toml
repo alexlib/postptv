@@ -20,6 +20,7 @@ dependencies = [
     "zarr>=3.0.0",
     "xarray>=2024.1.0",
     "matplotlib",
+    "vtk",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

@@ -204,6 +204,7 @@ def test_derived_fields_propagate_nan():
 
 
 def test_export_vtk_scalar_only_dataset(tmp_path):
+    pytest.importorskip("vtk")
     ds = xr.Dataset(
         {"TKE": (("x", "y", "z", "phase"), np.ones((2, 2, 2, 2)))},
         coords={"x": [0.0, 1.0], "y": [0.0, 1.0], "z": [0.0, 1.0],

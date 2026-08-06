@@ -160,6 +160,7 @@ def test_in_memory_vs_disk_pipeline_equivalence(tmp_path):
 
 def test_export_vtk_structured_grid(sample_dataset, tmp_path):
     """export_vtk must write valid binary VTK structured grid files for all phases."""
+    pytest.importorskip("vtk")
     vtk_dir = tmp_path / "vtk"
     paths = export_vtk(sample_dataset, vtk_dir, prefix="test_phase")
 
@@ -172,6 +173,7 @@ def test_export_vtk_structured_grid(sample_dataset, tmp_path):
 
 def test_streamlined_pipeline_full_integration(tmp_path, monkeypatch):
     """Test full streamlined_pipeline execution with both NetCDF and Zarr output."""
+    pytest.importorskip("vtk")
     (tmp_path / "config.yaml").write_text(yaml.safe_dump({
         "traj_min_length": 20, "first": 100001, "last": 100020,
         "frate": 5000, "hb": 70, "data_path": ".", "set_names": ["s1", "s2"],
