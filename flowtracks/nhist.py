@@ -1,5 +1,4 @@
 import numpy as np
-from matplotlib import pyplot as plt
 from typing import Optional, Tuple, Union
 
 def nhist_scipy(
@@ -113,6 +112,8 @@ def nhist(y, x=None, *args, plot=True):
 
 # --- Test block to compare nhist and nhist_scipy ---
 if __name__ == "__main__":
+    from matplotlib import pyplot as plt
+
     np.random.seed(0)
     data = np.random.normal(loc=0, scale=1, size=1000)
     bins = 30

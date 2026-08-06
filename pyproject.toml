@@ -7,7 +7,7 @@ name = "flowtracks"
 version = "1.2.0"
 description = "Library for handling 3D PTV trajectory databases and Lagrangian/Eulerian turbulence post-processing."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [{ name = "Yosef Meller", email = "yosefm@gmail.com" }]
 license = { file = "LICENSE.txt" }
 dependencies = [
@@ -19,16 +19,16 @@ dependencies = [
     "netcdf4",
     "zarr>=3.0.0",
     "xarray>=2024.1.0",
+    "matplotlib",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering"
 ]
 
