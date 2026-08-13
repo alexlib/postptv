@@ -72,59 +72,78 @@ def stitch_trajectories(
                 'vel': vel_tr[0],
             })
 
+        # Bucket both ends and starts by frame, then evaluate one (end-frame,
+        # start-frame) bucket pair at a time as a single vectorised numpy op
+        # instead of a Python-level np.linalg.norm call per pair. A real
+        # dataset's trajectory count (tens of thousands after tracking) makes
+        # both a full N^2 pair scan AND N^2 individual small-array norm()
+        # calls too slow to finish - per-pair Python/numpy dispatch overhead
+        # dominates even once the candidate SET itself is bucketed down.
+        # Batching within each bucket pair changes neither the candidate set
+        # nor the costs, only how they get computed.
+        starts_by_frame: dict[int, list[int]] = {}
+        for j, s in enumerate(starts):
+            starts_by_frame.setdefault(int(round(s['t'])), []).append(j)
+        ends_by_frame: dict[int, list[int]] = {}
+        for i, e in enumerate(ends):
+            ends_by_frame.setdefault(int(round(e['t'])), []).append(i)
+
+        end_pos = np.array([e['pos'] for e in ends])
+        end_vel = np.array([e['vel'] for e in ends])
+        start_pos = np.array([s['pos'] for s in starts])
+        start_vel = np.array([s['vel'] for s in starts])
+
         candidates = []
-        for i in range(N):
-            t_end = ends[i]['t']
-            p_end = ends[i]['pos']
-            v_end = ends[i]['vel']
+        for t_end_frame, end_idx in ends_by_frame.items():
+            end_idx = np.asarray(end_idx)
+            p_end = end_pos[end_idx][:, None, :]  # (m,1,3)
+            v_end = end_vel[end_idx][:, None, :]  # (m,1,3)
 
-            for j in range(N):
-                if i == j:
+            for gap_frames in range(0, max_gap + 1):
+                start_idx = starts_by_frame.get(t_end_frame + gap_frames + 1)
+                if not start_idx:
                     continue
-
-                t_start = starts[j]['t']
-                p_start = starts[j]['pos']
-                v_start = starts[j]['vel']
-
-                gap_frames = int(round(t_start - t_end - 1))
-                if not (0 <= gap_frames <= max_gap):
-                    continue
+                start_idx = np.asarray(start_idx)
+                p_start = start_pos[start_idx][None, :, :]  # (1,n,3)
+                v_start = start_vel[start_idx][None, :, :]  # (1,n,3)
 
                 delta_t = (gap_frames + 1) * dt
+                dist_fwd = np.linalg.norm(p_end + v_end * delta_t - p_start, axis=2)
+                dist_bwd = np.linalg.norm(p_start - v_start * delta_t - p_end, axis=2)
+                dist = 0.5 * (dist_fwd + dist_bwd)  # (m,n)
+                vel_diff = np.linalg.norm(v_end - v_start, axis=2)  # (m,n)
 
-                p_extrap_fwd = p_end + v_end * delta_t
-                p_extrap_bwd = p_start - v_start * delta_t
-
-                dist_fwd = np.linalg.norm(p_extrap_fwd - p_start)
-                dist_bwd = np.linalg.norm(p_extrap_bwd - p_end)
-                dist = 0.5 * (dist_fwd + dist_bwd)
-
-                if dist > max_distance:
-                    continue
-
-                vel_diff = np.linalg.norm(v_end - v_start)
-                if vel_diff > max_vel_diff:
-                    continue
-
-                cost = dist + 0.1 * vel_diff
-                candidates.append((i, j, cost))
+                rows, cols = np.nonzero((dist <= max_distance) & (vel_diff <= max_vel_diff))
+                for r, c in zip(rows, cols):
+                    gi, gj = int(end_idx[r]), int(start_idx[c])
+                    if gi == gj:
+                        continue
+                    candidates.append((gi, gj, float(dist[r, c] + 0.1 * vel_diff[r, c])))
 
         if not candidates:
             break
 
+        # Solve the assignment only over the rows/columns that actually have
+        # a candidate - a dense NxN matrix (and linear_sum_assignment's cost
+        # on it) is the other place N^2 previously showed up, and real gap
+        # candidates are a small fraction of all trajectories.
+        rows = sorted({i for i, _, _ in candidates})
+        cols = sorted({j for _, j, _ in candidates})
+        row_pos = {i: r for r, i in enumerate(rows)}
+        col_pos = {j: c for c, j in enumerate(cols)}
+
         BIG_COST = 1e9
-        cost_matrix = np.full((N, N), BIG_COST, dtype=np.float64)
-
+        cost_matrix = np.full((len(rows), len(cols)), BIG_COST, dtype=np.float64)
         for i, j, c in candidates:
-            cost_matrix[i, j] = c
+            cost_matrix[row_pos[i], col_pos[j]] = min(cost_matrix[row_pos[i], col_pos[j]], c)
 
-        row_ind, col_indices = linear_sum_assignment(cost_matrix)
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
         matches = []
-        for r, c in zip(row_ind, col_indices):
+        for r, c in zip(row_ind, col_ind):
             cost_val = cost_matrix[r, c]
             if cost_val < BIG_COST / 2:
-                matches.append((r, c))
+                matches.append((rows[r], cols[c]))
 
         if not matches:
             break
