@@ -1042,7 +1042,20 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
                 trajids[:] = np.arange(next_trajid, next_trajid + n)
                 next_trajid += n
             else:
-                linked = prev_ids >= 0
+                # A `prev` claim must be unique to count as a real link: if
+                # two particles in this frame both claim the same
+                # predecessor, the tracker's linkage is ambiguous for that
+                # predecessor and neither claim can be trusted. Merging them
+                # under one trajid was observed to snowball into a single
+                # "trajectory" absorbing hundreds of unrelated particles
+                # over a 100-frame run - worse than the bug this replaced.
+                claimed, claim_counts = np.unique(
+                    prev_ids[prev_ids >= 0], return_counts=True
+                )
+                ambiguous = set(claimed[claim_counts > 1].tolist())
+                linked = np.array(
+                    [p >= 0 and p not in ambiguous for p in prev_ids]
+                )
                 trajids[linked] = prev_trajids[prev_ids[linked]]
                 n_new = int((~linked).sum())
                 trajids[~linked] = np.arange(next_trajid, next_trajid + n_new)
