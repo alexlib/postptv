@@ -1005,7 +1005,74 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
 
         return trajects
 
-    # Case 2: Reading frame-by-frame 3D correspondences from openptv2 (e.g., correspondences/frame_10000)
+    # Case 2: Walk the tracker's own prev/next linkage (openptv2's
+    # linkage/<name>/frame_NNNNN groups, written by ZarrStore.write_linkage
+    # in the same prev/next/pos shape as a classic ptv_is.# file). This is
+    # the real particle identity across frames. The correspondences group
+    # (case 3 below) has no such column: its 4th+ fields are per-camera 2D
+    # target array indices, which reset every frame and are NOT a trajectory
+    # id, so grouping by them stitches together unrelated particles.
+    elif "linkage" in root:
+        link_root = root["linkage"]
+        linkage_name = "ptv_is" if "ptv_is" in link_root else next(iter(link_root.keys()), None)
+        link_group = link_root[linkage_name] if linkage_name else None
+        frame_keys = sorted(
+            [k for k in link_group.keys() if k.startswith("frame_")],
+            key=lambda k: int(k.split("_")[1]),
+        ) if link_group is not None else []
+        if first is not None:
+            frame_keys = [k for k in frame_keys if int(k.split("_")[1]) >= first]
+        if last is not None:
+            frame_keys = [k for k in frame_keys if int(k.split("_")[1]) <= last]
+
+        pos_l, time_l, trajid_l = [], [], []
+        prev_trajids = None
+        next_trajid = 0
+        for fkey in frame_keys:
+            frame_num = int(fkey.split("_")[1])
+            fg = link_group[fkey]
+            prev_ids = np.asarray(fg["prev"])
+            pos = np.asarray(fg["pos"])
+            n = len(pos)
+            trajids = np.empty(n, dtype=np.int64)
+            if prev_trajids is None:
+                # First frame in range: nothing to inherit from, every
+                # particle starts a new trajectory (mirrors
+                # iter_trajectories_ptvis' treatment of its first frame).
+                trajids[:] = np.arange(next_trajid, next_trajid + n)
+                next_trajid += n
+            else:
+                linked = prev_ids >= 0
+                trajids[linked] = prev_trajids[prev_ids[linked]]
+                n_new = int((~linked).sum())
+                trajids[~linked] = np.arange(next_trajid, next_trajid + n_new)
+                next_trajid += n_new
+            pos_l.append(pos)
+            time_l.append(np.full(n, frame_num, dtype=np.int64))
+            trajid_l.append(trajids)
+            prev_trajids = trajids
+
+        if not pos_l:
+            return []
+
+        pos_all = np.concatenate(pos_l)
+        time_all = np.concatenate(time_l)
+        trajid_all = np.concatenate(trajid_l)
+
+        trajects = []
+        for trid in np.unique(trajid_all):
+            idx = np.where(trajid_all == trid)[0]
+            if len(idx) < 2:
+                continue
+            idx = idx[np.argsort(time_all[idx])]
+            p_pos = pos_all[idx]
+            p_time = time_all[idx]
+            p_vel = np.zeros_like(p_pos)
+            trajects.append(Trajectory(p_pos, p_vel, p_time, int(trid)))
+
+        return trajects
+
+    # Case 3: Reading frame-by-frame 3D correspondences from openptv2 (e.g., correspondences/frame_10000)
     elif "correspondences" in root or group == "correspondences":
         corr_group = root["correspondences"] if "correspondences" in root else root
         frame_keys = sorted(
