@@ -295,8 +295,8 @@ class Scene(object):
             trajids = np.intersect1d(arr_trids, next_arr_trids, assume_unique=True)
             
             # select only those from the two frames:
-            in_arr = np.in1d(arr_trids, trajids, assume_unique=True)
-            in_next_arr = np.in1d(next_arr_trids, trajids, assume_unique=True)
+            in_arr = np.isin(arr_trids, trajids, assume_unique=True)
+            in_next_arr = np.isin(next_arr_trids, trajids, assume_unique=True)
             
             if len(in_arr) > 0:
                 arr = arr[in_arr]
@@ -330,8 +330,11 @@ class Scene(object):
         Returns:
         a list of arrays, in the order of ``keys``.
         """
-        # Compose query to PyTables engine:
-        conds = [self._frame_limit]
+        # Compose query to PyTables engine. self._frame_limit may be "" (no
+        # frame-range restriction set); joining it in unconditionally used to
+        # prepend a stray "& " before any `where` condition, which PyTables'
+        # expression compiler rejects outright.
+        conds = [c for c in [self._frame_limit] if c]
         if where is not None:
             for key, rng in where.items():
                 conds.append(gen_query_string(key, rng))
@@ -370,6 +373,22 @@ class Scene(object):
         return min_pos, max_pos
             
         
+def open_scene(path, frame_range=None):
+    """Open a :class:`Scene` (HDF5) or :class:`~.zarr_scene.ZarrScene`
+    (Zarr), whichever the path's format resolves to via
+    :func:`flowtracks.io.infer_format`. The two classes are duck-type
+    compatible for every reader method, so callers do not need to branch
+    on which one they got.
+    """
+    from .io import infer_format
+
+    if infer_format(str(path)) == "zarr":
+        from .zarr_scene import ZarrScene
+
+        return ZarrScene(path, frame_range)
+    return Scene(path, frame_range)
+
+
 class DualScene(object):
     """
     Holds a scene orresponding to the dual-PTV systems, which shoot separate
