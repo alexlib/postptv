@@ -964,8 +964,15 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
     root = zarr.open_group(str(zarr_path), mode="r")
     target_group = root[group] if group in root else root
 
+    # The tracker's linkage is the source of truth; /trajectories is a derived
+    # cache written by post-processing (openptv_cloud.post.convert). Re-tracking
+    # does not refresh it, so preferring it silently replays a stale result --
+    # observed as trajectories jumping tens of mm/frame, far past the tracker's
+    # own velocity bound. Read it only when there is no linkage to walk.
+    has_linkage = "linkage" in root and len(list(root["linkage"].keys())) > 0
+
     # Case 1: Structured dataset in /trajectories (arrays: pos, vel, accel, time, trajid)
-    if "trajid" in target_group:
+    if "trajid" in target_group and not has_linkage:
         trajid_arr = np.asarray(target_group["trajid"])
         time_arr = np.asarray(target_group["time"])
         pos_arr = np.asarray(target_group["pos"])
@@ -1027,6 +1034,7 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
 
         pos_l, time_l, trajid_l = [], [], []
         prev_trajids = None
+        prev_frame_num = None
         next_trajid = 0
         for fkey in frame_keys:
             frame_num = int(fkey.split("_")[1])
@@ -1035,6 +1043,16 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
             pos = np.asarray(fg["pos"])
             n = len(pos)
             trajids = np.empty(n, dtype=np.int64)
+            if prev_trajids is not None and (
+                prev_frame_num != frame_num - 1
+                or (prev_ids.size and prev_ids.max() >= len(prev_trajids))
+            ):
+                # `prev` indexes the frame immediately before this one. A gap
+                # in the stored frames -- or a row count that disagrees with
+                # the linkage (frames left over from an earlier run in an
+                # appended store) -- means those indices address unrelated
+                # particles. Break every chain rather than invent a link.
+                prev_trajids = None
             if prev_trajids is None:
                 # First frame in range: nothing to inherit from, every
                 # particle starts a new trajectory (mirrors
@@ -1064,6 +1082,7 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
             time_l.append(np.full(n, frame_num, dtype=np.int64))
             trajid_l.append(trajids)
             prev_trajids = trajids
+            prev_frame_num = frame_num
 
         if not pos_l:
             return []
