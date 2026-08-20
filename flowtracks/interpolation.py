@@ -209,8 +209,6 @@ def rbf_interp(tracer_dists, dists, use_parts, data, epsilon=1e-2):
     """
     kernel = np.exp(-tracer_dists**2 * epsilon)
 
-    # Determine the set of coefficients for each particle:
-    coeffs = np.zeros(dists.shape + (data.shape[-1],))
     k_per_row = use_parts.sum(axis=1)
 
     # When ``use_parts`` is a boolean mask with the same fixed number of
@@ -228,16 +226,20 @@ def rbf_interp(tracer_dists, dists, use_parts, data, epsilon=1e-2):
         K_stack = kernel[nbrs[:, :, None], nbrs[:, None, :]]   # (m,k,k)
         data_stack = data[nbrs]                                # (m,k,d)
         coeffs_stack = np.linalg.solve(K_stack, data_stack)    # (m,k,d)
-        coeffs[rows[:, None], nbrs] = coeffs_stack
+
+        chosen_dists = dists[rows[:, None], nbrs]
+        rbf_chosen = np.exp(-chosen_dists**2 * epsilon)
+        return np.sum(rbf_chosen[..., None] * coeffs_stack, axis=1)
     else:
+        coeffs = np.zeros(dists.shape + (data.shape[-1],))
         for pix in range(dists.shape[0]):
             neighbs = np.nonzero(use_parts[pix])[0]
             K = kernel[np.ix_(neighbs, neighbs)]
             coeffs[pix, neighbs] = np.linalg.solve(K, data[neighbs])
 
-    rbf = np.exp(-dists**2 * epsilon)
-    vel_interp = np.sum(rbf[..., None] * coeffs, axis=1)
-    return vel_interp
+        rbf = np.exp(-dists**2 * epsilon)
+        vel_interp = np.sum(rbf[..., None] * coeffs, axis=1)
+        return vel_interp
 
 
 def interpolant(method, num_neighbs=None, radius=None, param=None):
@@ -608,6 +610,24 @@ class GeneralInterpolant(object):
                                           companionship)
 
         if self._method == 'rbf':
+            is_mask = (use_parts.dtype == np.bool_)
+            k_per_row = use_parts.sum(axis=1) if is_mask else np.array([])
+            if is_mask and k_per_row.shape[0] > 0 \
+                    and np.all(k_per_row == k_per_row[0]) and k_per_row[0] > 0:
+                k = int(k_per_row[0])
+                rows = np.arange(dists.shape[0])
+                nbrs = np.where(use_parts)[1].reshape(dists.shape[0], k)
+                p_nbrs = tracer_pos[nbrs]
+                delta = p_nbrs[:, :, None, :] - p_nbrs[:, None, :, :]
+                dists_sq = np.sum(delta * delta, axis=-1)
+                K_stack = np.exp(-dists_sq * self._par)
+                data_stack = data[nbrs]
+                coeffs_stack = np.linalg.solve(K_stack, data_stack)
+
+                chosen_dists = dists[rows[:, None], nbrs]
+                rbf_chosen = np.exp(-chosen_dists**2 * self._par)
+                return np.sum(rbf_chosen[..., None] * coeffs_stack, axis=1)
+
             tracer_dists = _select_neighbs_dense(tracer_pos, tracer_pos,
                 self._radius, self._neighbs, companionship)[0]
             return rbf_interp(tracer_dists, dists, use_parts, data, self._par)

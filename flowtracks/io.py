@@ -315,10 +315,9 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
     frame = np.hstack((pos, vel, np.ones((max_traj, 1))*frame_num,
         trids[:,None]))
     frames.append(frame)
+    frames_sort_cache = [(trids, trids)]
 
-    traj_starts = {} # what is the starting frame for each trajectory.
-    for trid in trids:
-        traj_starts[trid] = 0
+    traj_starts = dict.fromkeys(trids, 0)
 
     trajects = {}
 
@@ -337,6 +336,7 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
 
         if table.ndim == 0:
             frames.append(None)
+            frames_sort_cache.append(None)
             continue
             # We assume that the next frame will have no continuing particles,
             # and this case is caused by detection failure. Otherwise the code
@@ -353,9 +353,9 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
 
         # Start new trajectories:
         num_new_traj = np.sum(~cont)
-        traj[~cont] = np.arange(max_traj, max_traj + num_new_traj)
-        for trid in traj[~cont]:
-            traj_starts[trid] = fix + 1
+        new_trids = np.arange(max_traj, max_traj + num_new_traj)
+        traj[~cont] = new_trids
+        traj_starts.update(dict.fromkeys(new_trids, fix + 1))
         max_traj += num_new_traj
 
         # Consolidate into frame table.
@@ -374,6 +374,9 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
             frames[-1][prev_ix,3:6] = \
                 (pos[cont] - frames[-1][prev_ix,:3]) * frate
         frames.append(frame)
+        trids_in_frame = frame[:, -1].astype(np.int64)
+        sort_ix = np.argsort(trids_in_frame)
+        frames_sort_cache.append((trids_in_frame[sort_ix], sort_ix))
 
         # Make Trajectory objects from fully-read trajectories, so we can
         # discard early frames they're in.
@@ -382,7 +385,7 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
             continue
 
         ending_trids = np.atleast_1d(frame[ending,-1].astype(np.int_))
-        ending_starts = np.r_[[traj_starts[trid] for trid in ending_trids]]
+        ending_starts = np.fromiter((traj_starts[trid] for trid in ending_trids), dtype=np.int64, count=len(ending_trids))
 
         # Filter short trajectories:
         traj_lens = fix - ending_starts + 2
@@ -401,20 +404,18 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
             in_frame = ending_starts <= scanix + frame_buffer_start
             active_ending_trids = ending_trids[in_frame]
             if len(active_ending_trids) == 0: continue
-            
-            trids_in_past = past_frame[:,-1].astype(np.int_)
-            sort_ix = np.argsort(trids_in_past)
-            sorted_trids = trids_in_past[sort_ix]
-            
+
+            sorted_trids, sort_ix = frames_sort_cache[scanix]
+
             locs = np.searchsorted(sorted_trids, active_ending_trids)
             valid = locs < len(sorted_trids)
             matched = valid.copy()
             if matched.any():
                 matched[valid] = sorted_trids[locs[valid]] == active_ending_trids[valid]
-                
+
             valid_active_trids = active_ending_trids[matched]
             valid_row_ixs = sort_ix[locs[matched]]
-            
+
             for trid, row_ix in zip(valid_active_trids, valid_row_ixs):
                 traj_rel_ix = scanix + frame_buffer_start - traj_starts[trid]
                 trajects[trid][traj_rel_ix] = past_frame[row_ix]
@@ -424,9 +425,10 @@ def iter_trajectories_ptvis(fname, first=None, last=None, frate=1., xuap=False,
         if len(cont_trids) == 0:
             new_start = fix
         else:
-            new_start = min([traj_starts[trid] for trid in cont_trids])
+            new_start = min(traj_starts[int(trid)] for trid in cont_trids)
 
         frames = frames[new_start - frame_buffer_start : ]
+        frames_sort_cache = frames_sort_cache[new_start - frame_buffer_start : ]
         frame_buffer_start = new_start
 
         # Convert the dictionary of trajectory arrays to list of Trajectory
@@ -996,19 +998,33 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
             accel_arr = accel_arr[mask]
 
         # Group by trajid
-        unique_trids = np.unique(trajid_arr)
+        if len(trajid_arr) == 0:
+            return []
+
+        order = np.lexsort((time_arr, trajid_arr))
+        trajid_sorted = trajid_arr[order]
+        time_sorted = time_arr[order]
+        pos_sorted = pos_arr[order]
+        vel_sorted = vel_arr[order] if vel_arr is not None else None
+        accel_sorted = accel_arr[order] if accel_arr is not None else None
+
+        bounds = np.flatnonzero(np.diff(trajid_sorted)) + 1
+        id_groups = np.split(trajid_sorted, bounds)
+        pos_groups = np.split(pos_sorted, bounds)
+        time_groups = np.split(time_sorted, bounds)
+        vel_groups = np.split(vel_sorted, bounds) if vel_sorted is not None else None
+        accel_groups = np.split(accel_sorted, bounds) if accel_sorted is not None else None
+
         trajects = []
-
-        for trid in unique_trids:
-            idx = np.where(trajid_arr == trid)[0]
-            if len(idx) == 0:
+        for i, (g_id, g_pos, g_time) in enumerate(zip(id_groups, pos_groups, time_groups)):
+            if len(g_id) == 0:
                 continue
-            vel_val = vel_arr[idx] if vel_arr is not None else np.zeros_like(pos_arr[idx])
+            trid = int(g_id[0])
+            vel_val = vel_groups[i] if vel_groups is not None else np.zeros_like(g_pos)
             kws = {}
-            if accel_arr is not None:
-                kws["accel"] = accel_arr[idx]
-
-            trajects.append(Trajectory(pos_arr[idx], vel_val, time_arr[idx], int(trid), **kws))
+            if accel_groups is not None:
+                kws["accel"] = accel_groups[i]
+            trajects.append(Trajectory(g_pos, vel_val, g_time, trid, **kws))
 
         return trajects
 
@@ -1091,16 +1107,23 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
         time_all = np.concatenate(time_l)
         trajid_all = np.concatenate(trajid_l)
 
+        order = np.lexsort((time_all, trajid_all))
+        trajid_sorted = trajid_all[order]
+        pos_sorted = pos_all[order]
+        time_sorted = time_all[order]
+
+        bounds = np.flatnonzero(np.diff(trajid_sorted)) + 1
+        id_groups = np.split(trajid_sorted, bounds)
+        pos_groups = np.split(pos_sorted, bounds)
+        time_groups = np.split(time_sorted, bounds)
+
         trajects = []
-        for trid in np.unique(trajid_all):
-            idx = np.where(trajid_all == trid)[0]
-            if len(idx) < 2:
+        for g_id, g_pos, g_time in zip(id_groups, pos_groups, time_groups):
+            if len(g_id) < 2:
                 continue
-            idx = idx[np.argsort(time_all[idx])]
-            p_pos = pos_all[idx]
-            p_time = time_all[idx]
-            p_vel = np.zeros_like(p_pos)
-            trajects.append(Trajectory(p_pos, p_vel, p_time, int(trid)))
+            trid = int(g_id[0])
+            p_vel = np.zeros_like(g_pos)
+            trajects.append(Trajectory(g_pos, p_vel, g_time, trid))
 
         return trajects
 
@@ -1132,18 +1155,27 @@ def read_zarr_trajectories(zarr_path, first=None, last=None, group="trajectories
             return []
 
         pts = np.array(all_points)
+        time_pts = pts[:, 3].astype(int)
+        trid_pts = pts[:, 4].astype(int)
+        pos_pts = pts[:, :3]
 
-        unique_trids = np.unique(pts[:, 4].astype(int))
+        order = np.lexsort((time_pts, trid_pts))
+        trid_sorted = trid_pts[order]
+        pos_sorted = pos_pts[order]
+        time_sorted = time_pts[order]
+
+        bounds = np.flatnonzero(np.diff(trid_sorted)) + 1
+        id_groups = np.split(trid_sorted, bounds)
+        pos_groups = np.split(pos_sorted, bounds)
+        time_groups = np.split(time_sorted, bounds)
+
         trajects = []
-        for trid in unique_trids:
-            idx = np.where(pts[:, 4].astype(int) == trid)[0]
-            if len(idx) < 2:
+        for g_id, g_pos, g_time in zip(id_groups, pos_groups, time_groups):
+            if len(g_id) < 2:
                 continue
-            sort_idx = idx[np.argsort(pts[idx, 3])]
-            p_pos = pts[sort_idx, :3]
-            p_time = pts[sort_idx, 3].astype(int)
-            p_vel = np.zeros_like(p_pos)
-            trajects.append(Trajectory(p_pos, p_vel, p_time, int(trid)))
+            trid = int(g_id[0])
+            p_vel = np.zeros_like(g_pos)
+            trajects.append(Trajectory(g_pos, p_vel, g_time, trid))
 
         return trajects
 
@@ -1168,44 +1200,35 @@ def save_zarr_trajectories(trajects, zarr_path, group="trajectories", overwrite=
     if len(trajects) == 0:
         return
 
-    all_pos = []
-    all_vel = []
-    all_accel = []
-    all_time = []
-    all_trajid = []
+    lens = np.fromiter((len(tr) for tr in trajects), dtype=np.int64, count=len(trajects))
+    trids = np.fromiter((tr.trajid() for tr in trajects), dtype=np.int64, count=len(trajects))
+    trajid_arr = np.repeat(trids, lens)
 
-    has_vel = False
-    has_accel = False
-
-    for tr in trajects:
-        n = len(tr)
-        all_pos.append(tr.pos())
-        all_time.append(tr.time())
-        all_trajid.append(np.full(n, tr.trajid(), dtype=np.int64))
-
-        if hasattr(tr, "velocity") and tr.velocity() is not None:
-            all_vel.append(tr.velocity())
-            has_vel = True
-        elif hasattr(tr, "vel") and tr.vel() is not None:
-            all_vel.append(tr.vel())
-            has_vel = True
-        if hasattr(tr, "accel") and tr.accel() is not None:
-            all_accel.append(tr.accel())
-            has_accel = True
-
-    pos_arr = np.vstack(all_pos)
-    time_arr = np.concatenate(all_time)
-    trajid_arr = np.concatenate(all_trajid)
+    all_pos = [tr.pos() for tr in trajects]
+    all_time = [tr.time() for tr in trajects]
+    pos_arr = np.concatenate(all_pos, axis=0)
+    time_arr = np.concatenate(all_time, axis=0)
 
     target_group.create_array("pos", data=pos_arr, overwrite=overwrite)
     target_group.create_array("time", data=time_arr, overwrite=overwrite)
     target_group.create_array("trajid", data=trajid_arr, overwrite=overwrite)
 
-    if has_vel and len(all_vel) == len(trajects):
-        vel_arr = np.vstack(all_vel)
+    first_tr = trajects[0]
+    has_vel = (hasattr(first_tr, "velocity") and first_tr.velocity() is not None) or (
+        hasattr(first_tr, "vel") and first_tr.vel() is not None
+    )
+    if has_vel:
+        all_vel = [
+            tr.velocity() if (hasattr(tr, "velocity") and tr.velocity() is not None) else tr.vel()
+            for tr in trajects
+        ]
+        vel_arr = np.concatenate(all_vel, axis=0)
         target_group.create_array("vel", data=vel_arr, overwrite=overwrite)
 
-    if has_accel and len(all_accel) == len(trajects):
-        accel_arr = np.vstack(all_accel)
+    has_accel = hasattr(first_tr, "accel") and first_tr.accel() is not None
+    if has_accel:
+        all_accel = [tr.accel() for tr in trajects]
+        accel_arr = np.concatenate(all_accel, axis=0)
         target_group.create_array("accel", data=accel_arr, overwrite=overwrite)
+
 

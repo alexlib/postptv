@@ -118,17 +118,18 @@ class ZarrScene:
     def trajectory_tags(self) -> np.ndarray:
         if self._tags is not None:
             return self._tags
+        if len(self._trajid) == 0:
+            return np.empty((0, 3), dtype=int)
         # No traj/ index: derive (trajid, first, last) from the data.
         order = np.argsort(self._trajid, kind="stable")
         trajid_sorted = self._trajid[order]
         time_sorted = self._time[order]
         bounds = np.flatnonzero(np.diff(trajid_sorted)) + 1
-        groups_id = np.split(trajid_sorted, bounds)
-        groups_t = np.split(time_sorted, bounds)
-        tags = np.array(
-            [[int(g[0]), int(t.min()), int(t.max())] for g, t in zip(groups_id, groups_t)]
-        )
-        return tags
+        starts = np.r_[0, bounds]
+        unique_ids = trajid_sorted[starts]
+        min_times = np.minimum.reduceat(time_sorted, starts)
+        max_times = np.maximum.reduceat(time_sorted, starts)
+        return np.column_stack([unique_ids, min_times, max_times]).astype(int)
 
     def set_frame_range(self, frame_range) -> None:
         if frame_range is None:
