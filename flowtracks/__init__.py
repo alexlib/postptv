@@ -1,6 +1,6 @@
 """Flowtracks: Complete 3D PTV Lagrangian & Eulerian Post-Processing Toolkit."""
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 from flowtracks.eulerian import derived_fields, eulerian_grid, export_vtk, save_netcdf
 from flowtracks.phase_average import fluctuations, phase_average

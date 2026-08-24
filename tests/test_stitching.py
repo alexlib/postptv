@@ -72,3 +72,100 @@ class TestTrajectoryStitching(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestFastStitching(unittest.TestCase):
+    def _segment(self, trajid, t0, t1, v, fps):
+        t = np.arange(t0, t1, dtype=np.float64)
+        pos = t[:, None] * (np.asarray(v) / fps)
+        vel = np.tile(np.asarray(v, dtype=float), (len(t), 1))
+        return Trajectory(pos, vel, t, trajid)
+
+    def test_fast_matches_reference_on_broken_linear(self):
+        """Same single merge as stitch_trajectories on the canonical case."""
+        fps = 10.0
+        tr1 = self._segment(101, 0, 5, [2.0, 0.0, 0.0], fps)
+        tr2 = self._segment(102, 7, 12, [2.0, 0.0, 0.0], fps)
+        ref = stitching.stitch_trajectories([tr1, tr2], fps=fps, max_gap=3, max_distance=1.0)
+        fast = stitching.stitch_trajectories_fast([tr1, tr2], fps=fps, max_gap=3, max_distance=1.0)
+        self.assertEqual(len(fast), 1)
+        np.testing.assert_array_equal(fast[0].time(), np.arange(12))
+        np.testing.assert_allclose(
+            fast[0].pos(), np.tile([0.2, 0.0, 0.0], (12, 1)) * np.arange(12)[:, None],
+            atol=1e-5,
+        )
+
+    def test_fast_equivalence_random_fragments(self):
+        """Greedy matching agrees with the reference on unambiguous fragments.
+
+        Fragments are spaced far apart in space so at most one candidate join
+        exists per endpoint; there the greedy and Hungarian results must be
+        identical.
+        """
+        fps = 10.0
+
+        # max_distance tiny -> nothing joins; both implementations agree
+        rng = np.random.default_rng(42)
+        trajs = []
+        tid = 1
+        for _ in range(60):
+            p0 = rng.uniform(-1000, 1000, size=3)
+            v = rng.uniform(-1, 1, size=3)
+            ta = np.arange(0, 4, dtype=np.float64)
+            tb = np.arange(6, 10, dtype=np.float64)
+            trajs.append(Trajectory(
+                p0[None, :] + ta[:, None] * (v / fps)[None, :],
+                np.tile(v, (4, 1)), ta, tid))
+            tid += 1
+            trajs.append(Trajectory(
+                p0[None, :] + tb[:, None] * (v / fps)[None, :],
+                np.tile(v, (4, 1)), tb, tid))
+            tid += 1
+        kwargs = dict(fps=fps, max_gap=3, max_distance=1e-6, max_vel_diff=1e9)
+        self.assertEqual(
+            len(stitching.stitch_trajectories(list(trajs), **kwargs)),
+            len(stitching.stitch_trajectories_fast(list(trajs), **kwargs)),
+        )
+
+        # now make each broken pair joinable: 50 far-apart linear tracks,
+        # each split into two segments with a 2-frame gap
+        trajs = []
+        fps_v = np.array([1.0, 0.0, 0.0])
+        for i in range(50):
+            p0 = np.array([10.0 * i, 0.0, 0.0])
+            ta = np.arange(0, 4, dtype=np.float64)
+            pos_a = p0[None, :] + ta[:, None] * (fps_v / fps)[None, :]
+            a = Trajectory(pos_a, np.tile(fps_v, (4, 1)), ta, 2 * i)
+            tb = np.arange(6, 10, dtype=np.float64)
+            pos_b = p0[None, :] + tb[:, None] * (fps_v / fps)[None, :]
+            b = Trajectory(pos_b, np.tile(fps_v, (4, 1)), tb, 2 * i + 1)
+            trajs.extend([a, b])
+        kwargs = dict(fps=fps, max_gap=3, max_distance=0.5, max_vel_diff=1e-6)
+        ref = stitching.stitch_trajectories(list(trajs), **kwargs)
+        fast = stitching.stitch_trajectories_fast(list(trajs), **kwargs)
+        self.assertEqual(len(ref), 50)
+        self.assertEqual(len(fast), 50)
+        for r, f in zip(sorted(ref, key=lambda x: x.trajid()), sorted(fast, key=lambda x: x.trajid())):
+            np.testing.assert_allclose(r.pos(), f.pos(), atol=1e-9)
+            np.testing.assert_array_equal(r.time(), f.time())
+
+    def test_fast_rejects_large_gap_and_distance(self):
+        """Criteria behave exactly as documented for the reference."""
+        fps = 1.0
+        far = Trajectory(np.ones((5, 3)) * 100.0, np.zeros((5, 3)), np.arange(5.0), 2)
+        near_gap = Trajectory(np.zeros((5, 3)), np.zeros((5, 3)), np.arange(15, 20.0), 3)
+        base = Trajectory(np.zeros((5, 3)), np.zeros((5, 3)), np.arange(5.0), 1)
+        self.assertEqual(len(stitching.stitch_trajectories_fast([base, far], max_gap=3, max_distance=5.0)), 2)
+        self.assertEqual(len(stitching.stitch_trajectories_fast([base, near_gap], max_gap=3, max_distance=5.0)), 2)
+
+    def test_fast_passes_through_non_monotonic_segments(self):
+        """Unlinked-particle buckets (repeated times) are not stitched."""
+        fps = 1.0
+        bucket = Trajectory(np.zeros((4, 3)), np.zeros((4, 3)), np.array([1, 1, 2, 2.0]), 0)
+        normal = self._segment(7, 3, 6, [1.0, 0, 0], fps)
+        out = stitching.stitch_trajectories_fast([bucket, normal], fps=fps, max_gap=5, max_distance=100.0)
+        self.assertEqual(len(out), 2)
+
+
+if __name__ == '__main__':
+    unittest.main()
