@@ -13,14 +13,12 @@ license = { file = "LICENSE.txt" }
 dependencies = [
     "numpy",
     "scipy",
-    "tables",
     "h5py",
     "pyyaml",
     "netcdf4",
     "zarr>=3.0.0",
     "xarray>=2024.1.0",
     "matplotlib",
-    "vtk",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -32,6 +30,13 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering"
 ]
+
+[project.optional-dependencies]
+# flowtracks/vtk_export.py and eulerian.export_vtk ParaView export (both
+# already guard the import at call time, so this is a convenience installer).
+vtk = ["vtk"]
+# flowtracks/io.py legacy NPZ/HDF5 scene reader (pytables-based).
+legacy-io = ["tables"]
 
 [dependency-groups]
 dev = [
